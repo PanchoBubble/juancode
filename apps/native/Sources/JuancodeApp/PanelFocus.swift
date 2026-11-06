@@ -82,7 +82,8 @@ private struct PanelNavigationHost: ViewModifier {
     func body(content: Content) -> some View {
         content.backgroundPreferenceValue(PanelRowsKey.self) { rows in
             PanelKeyHost(model: model, target: target, rows: rows)
-                .frame(width: 0, height: 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
         }.onDisappear {
             if model.panelNavigation.target == target { model.focusTerminal() }
         }
@@ -108,7 +109,7 @@ private struct PanelKeyHost: NSViewRepresentable {
     }
 }
 
-private final class PanelKeyView: NSView {
+final class PanelKeyView: NSView {
     weak var model: AppModel?
     var target: PanelFocusTarget?
     var rows: [PanelNavigationRow] = []
@@ -127,6 +128,15 @@ private final class PanelKeyView: NSView {
             model.panelNavigation.begin(target, rows: rows)
         }
     }
+    /// Focus an already visible panel without opening a row or changing rail tabs.
+    func focusForNavigation() -> Bool {
+        guard let model, let target, window?.makeFirstResponder(self) == true else { return false }
+        model.consumedPanelFocusSerial = model.panelFocusRequest?.serial
+        model.suppressTerminalAutoFocus = true
+        model.panelNavigation.begin(target, rows: rows)
+        return true
+    }
+
     override func resignFirstResponder() -> Bool {
         if model?.panelNavigation.target == target {
             model?.panelNavigation.end()
@@ -136,10 +146,41 @@ private final class PanelKeyView: NSView {
     }
     override func keyDown(with event: NSEvent) {
         guard let model, window?.attachedSheet == nil,
-              !model.changesKeyboardActive, !model.showingDiffReview,
               event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
         else { super.keyDown(with: event); return }
         if event.keyCode == 53 { model.focusTerminal(); return }
         if !model.panelNavigation.handle(event.keyCode) { super.keyDown(with: event) }
     }
+}
+
+/// Find real, visible terminal surfaces and panel key hosts in this window. Hit
+/// testing excludes pooled terminals hidden or covered by another destination.
+@MainActor
+func focusAdjacentPane(_ direction: PaneFocusDirection, window: NSWindow, model: AppModel) -> Bool {
+    guard let content = window.contentView, let source = window.firstResponder as? NSView,
+          source is JuancodeTerminalResponder || source is PanelKeyView else { return false }
+    var views: [NSView] = []
+    func collect(_ view: NSView) {
+        guard !view.isHiddenOrHasHiddenAncestor, view.alphaValue > 0,
+              view.visibleRect.width > 1, view.visibleRect.height > 1 else { return }
+        if let panel = view as? PanelKeyView, let target = panel.target {
+            if let rail = target.railPanel {
+                if model.isRailPanelOpen(rail) { views.append(panel) }
+            } else if model.projectsSidebarVisible { views.append(panel) }
+        } else if view is JuancodeTerminalResponder {
+            let center = view.convert(NSPoint(x: view.visibleRect.midX, y: view.visibleRect.midY), to: content.superview)
+            if let hit = content.hitTest(center), hit === view || hit.isDescendant(of: view) {
+                views.append(view)
+            }
+        }
+        for child in view.subviews { collect(child) }
+    }
+    collect(content)
+    let candidates = views.filter { $0 !== source }
+    guard let index = direction.destination(from: source.convert(source.visibleRect, to: nil),
+                                            candidates: candidates.map { $0.convert($0.visibleRect, to: nil) })
+    else { return true } // An edge is a no-op, never a control byte in the PTY.
+    let destination = candidates[index]
+    if let panel = destination as? PanelKeyView { return panel.focusForNavigation() }
+    return window.makeFirstResponder(destination)
 }

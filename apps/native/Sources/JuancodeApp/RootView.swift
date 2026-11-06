@@ -302,6 +302,32 @@ private struct ContainedScroll<Content: View>: NSViewRepresentable {
     final class Coordinator { var hosting: NSHostingView<AnyView>? }
 }
 
+/// Expanded folders use an AppKit scroll view with its own hosting root, so the
+/// outer List's ScrollViewReader cannot reveal their rows. Scroll the actual row
+/// anchor inside that native document when its browse cursor arrives.
+private struct SidebarBrowseScrollAnchor: NSViewRepresentable {
+    let focused: Bool
+    func makeNSView(context: Context) -> Anchor { Anchor() }
+    func updateNSView(_ view: Anchor, context: Context) {
+        let arrived = focused && !view.focused
+        view.focused = focused
+        if arrived { view.reveal() }
+    }
+    final class Anchor: NSView {
+        var focused = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if focused { reveal() }
+        }
+        func reveal() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.focused, let document = self.enclosingScrollView?.documentView else { return }
+                document.scrollToVisible(self.convert(self.bounds, to: document))
+            }
+        }
+    }
+}
+
 /// Hidden bridge that installs the window-scoped monitors that must sit ahead of the
 /// terminal in the responder chain (only an NSEvent local monitor can): the keyboard
 /// one for vim-style sidebar navigation and ⌃H/⌃L pane focus (juancode-vgm), and the
@@ -1202,6 +1228,45 @@ struct SidebarView: View {
         return ids
     }
 
+    private func navigationRows(_ groups: [FolderGroup]) -> [PanelNavigationRow] {
+        var rows: [PanelNavigationRow] = []
+        for group in groups {
+            let folderID = "folder:" + group.cwd
+            rows.append(PanelNavigationRow(id: folderID,
+                isInitial: isCollapsed(group.cwd) && group.sessions.contains { $0.id == model.selection },
+                open: { toggleFolder(group.cwd) }))
+            guard !isCollapsed(group.cwd) else { continue }
+            let shown = expandedFolders.contains(group.cwd) ? group.sessions : previewSessions(group)
+            for meta in shown where !model.isExternal(meta.id) {
+                var actions = [
+                    PanelRowAction(id: "pin", label: model.isPinned(meta.id) ? "Unpin" : "Pin",
+                                   perform: { model.togglePinned(meta.id) }),
+                    PanelRowAction(id: "rename", label: "Rename", perform: { beginRename(meta) })
+                ]
+                if model.isLive(meta.id) {
+                    actions.append(PanelRowAction(id: "kill", label: "Kill Agent", perform: { model.killSession(meta.id) }))
+                }
+                actions.append(PanelRowAction(id: "delete", label: "Delete", perform: { confirmingClose = meta }))
+                rows.append(PanelNavigationRow(id: meta.id, actions: actions, isInitial: model.selection == meta.id,
+                                               open: { model.selectSidebarSession(meta.id); model.focusTerminal() }))
+            }
+            if previewSessions(group).count < group.sessions.count {
+                rows.append(PanelNavigationRow(id: "fold:" + group.cwd, open: {
+                    if expandedFolders.contains(group.cwd) { expandedFolders.remove(group.cwd) }
+                    else { expandedFolders.insert(group.cwd) }
+                }))
+            }
+        }
+        return rows
+    }
+
+    private func toggleFolder(_ cwd: String) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            if collapsedFolders.contains(cwd) { collapsedFolders.remove(cwd) }
+            else { collapsedFolders.insert(cwd) }
+        }
+    }
+
     var body: some View {
         @Bindable var model = model
         // Derive the grouped/sorted list once per body eval and thread it through
@@ -1314,15 +1379,10 @@ struct SidebarView: View {
                 // above every section header.
                 ForEach(groups) { group in
                         FolderHeader(group: group, collapsed: isCollapsed(group.cwd)) {
-                            // Animated so the section's rows slide in/out instead of snapping.
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                if collapsedFolders.contains(group.cwd) {
-                                    collapsedFolders.remove(group.cwd)
-                                } else {
-                                    collapsedFolders.insert(group.cwd)
-                                }
-                            }
+                            toggleFolder(group.cwd)
                         }
+                        .id("folder:" + group.cwd)
+                        .panelRowFocus(.sessions, id: "folder:" + group.cwd)
                         // Hairline between projects, so adjacent headers don't run together.
                         .overlay(alignment: .top) {
                             if group.cwd != groups.first?.cwd {
@@ -1375,6 +1435,8 @@ struct SidebarView: View {
                 }
                 trackedIssuesSection
             }
+            .panelNavigationRows(navigationRows(groups))
+            .panelNavigationScroll(.sessions, proxy: proxy)
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .modifier(FloatingScrollIndicator())
@@ -1518,6 +1580,7 @@ struct SidebarView: View {
             foldButton("Load more (\(sessions.count - shown.count))", systemImage: "chevron.down.circle") {
                 _ = expandedFolders.insert(group.cwd)
             }
+            .id("fold:" + group.cwd).panelRowFocus(.sessions, id: "fold:" + group.cwd)
             .modifier(SidebarListRow())
             .selectionDisabled()
         }
@@ -1562,6 +1625,7 @@ struct SidebarView: View {
             foldButton("Show less", systemImage: "chevron.up.circle") {
                 _ = expandedFolders.remove(cwd)
             }
+            .id("fold:" + cwd).panelRowFocus(.sessions, id: "fold:" + cwd)
         }
         .modifier(SidebarListRow())
         .selectionDisabled()
@@ -1578,6 +1642,7 @@ struct SidebarView: View {
                                        session: meta))
             .modifier(SidebarListRow())
             .pointerCursor(enabled: !external)
+            .id(meta.id).panelRowFocus(.sessions, id: meta.id)
             .tag(meta.id)
             .selectionDisabled(external)
             // Also for a tracked-PR row in the main checkout: its capsule now carries
@@ -1601,6 +1666,11 @@ struct SidebarView: View {
                                        selected: external ? nil : model.selection == meta.id,
                                        session: meta))
             .pointerCursor(enabled: !external)
+            .id(meta.id).panelRowFocus(.sessions, id: meta.id)
+            .background {
+                SidebarBrowseScrollAnchor(focused: model.panelNavigation.isFocused(.sessions, row: meta.id))
+                    .allowsHitTesting(false)
+            }
             .onTapGesture {
                 if !external {
                     model.selectSidebarSession(meta.id)
@@ -2561,6 +2631,7 @@ struct TrackBadge: View {
 }
 
 struct SessionRow: View {
+    @Environment(AppModel.self) private var model
     let meta: SessionMeta
     /// The handoff line the usage tooltip is read against (juancode-u5q).
     @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
@@ -2766,7 +2837,7 @@ struct SessionRow: View {
     /// row's trailing edge.
     @ViewBuilder
     private var hoverActions: some View {
-        if !external, hovering,
+        if !external, hovering || model.panelNavigation.isFocused(.sessions, row: meta.id),
            menuContent != nil || onTogglePin != nil
                || onRun != nil {
             RowHoverActions(menuContent: menuContent,

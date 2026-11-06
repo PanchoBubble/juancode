@@ -357,15 +357,10 @@ func installBackForwardMouse(model: AppModel, oracle: OracleModel, host: NSView)
 /// before the terminal ever sees it. We derive the active pane from the live first
 /// responder (robust to mouse clicks) rather than tracking it ourselves:
 ///
-/// - **In the terminal:** only ⌃H is intercepted (→ focus sidebar). Everything else,
-///   including ⌃L (clear screen), passes straight through, so normal typing is intact.
-/// - **In the sidebar:** j/k (and ↓/↑) move the selection, g/G jump to first/last,
-///   Enter/l/⌃L open the session (focus the terminal). Modified keys pass through so
-///   app shortcuts (⌘N, ⌃Space, …) still fire; plain keys are swallowed so they don't
-///   leak into the pty behind the list.
-///
-/// Scoped to our own key window (and only when no sheet is attached / no text field is
-/// editing) so it never hijacks dialogs or the filter field.
+/// Ctrl-H/J/K/L and Alt-arrows move focus between visible terminal panes and
+/// navigation panels. Panel-local key hosts own plain browsing keys. Reviews,
+/// text fields and editor Ctrl motions keep their own input. Sheets disable the
+/// window shortcuts entirely.
 /// Whether the keyboard is in an editor: an in-place editor tab or overlay, or a
 /// terminal while an editor session (kind `.editor`) is the selection.
 @MainActor
@@ -441,6 +436,15 @@ func installPaneNavigation(model: AppModel, oracle: OracleModel, shortcuts: Shor
     let handle: @MainActor (UInt16, NSEvent.ModifierFlags) -> Bool = { [weak host] keyCode, mods in
         guard let window = host?.window, window.isKeyWindow, window.attachedSheet == nil
         else { return false }
+        // Review mode owns its Ctrl motions. Text fields retain editing bindings;
+        // nvim retains Ctrl motions, as with the existing editor shortcut routing.
+        if let direction = PaneFocusDirection.matching(
+            keyCode: keyCode, modifiers: mods,
+            reviewActive: model.showingDiffReview || model.changesKeyboardActive
+                || window.firstResponder is ReviewKeyCatcherView,
+            editingText: window.firstResponder is NSTextView,
+            editorFocused: editorHasFocus(window.firstResponder, model: model)),
+           focusAdjacentPane(direction, window: window, model: model) { return true }
         // Oracle sits above the review and the other detail panels. Their fallback
         // handlers must not redirect keys away from its terminal.
         guard !oracle.expanded else { return false }

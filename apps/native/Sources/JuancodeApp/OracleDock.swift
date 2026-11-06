@@ -467,39 +467,46 @@ struct OracleGlobalRail: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        // Pinned rows get their own band above Active — an idle
-                        // Oracle sitting over the working ones needs to say why.
-                        let groups = [
-                            ("Pinned", shown.filter(\.pinned)),
-                            ("Active", shown.filter { $0.live && !$0.pinned }),
-                            ("Idle", shown.filter { !$0.live && !$0.pinned }),
-                        ].filter { !$0.1.isEmpty }
-                        // Only label the bands when more than one is on screen — with
-                        // a single kind showing, a header is noise.
-                        ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
-                            if groups.count > 1 { groupLabel(group.0) }
-                            ForEach(group.1) { row($0) }
-                        }
-                        if hidden > 0 {
-                            footerButton("Show \(hidden) more") {
-                                showIdle = true
-                                revealed += fitted
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            // Pinned rows get their own band above Active — an idle
+                            // Oracle sitting over the working ones needs to say why.
+                            let groups = [
+                                ("Pinned", shown.filter(\.pinned)),
+                                ("Active", shown.filter { $0.live && !$0.pinned }),
+                                ("Idle", shown.filter { !$0.live && !$0.pinned }),
+                            ].filter { !$0.1.isEmpty }
+                            // Only label the bands when more than one is on screen — with
+                            // a single kind showing, a header is noise.
+                            ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
+                                if groups.count > 1 { groupLabel(group.0) }
+                                ForEach(group.1) { row($0) }
+                            }
+                            if hidden > 0 {
+                                footerButton("Show \(hidden) more") {
+                                    showIdle = true
+                                    revealed += fitted
+                                }
+                                .id("oracle-more").panelRowFocus(.oracles, id: "oracle-more")
+                            }
+                            if shown.count > max(fitted, kept.count) {
+                                footerButton("Show less") {
+                                    showIdle = false
+                                    revealed = 0
+                                }
+                                .id("oracle-less").panelRowFocus(.oracles, id: "oracle-less")
                             }
                         }
-                        if shown.count > max(fitted, kept.count) {
-                            footerButton("Show less") {
-                                showIdle = false
-                                revealed = 0
-                            }
-                        }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+                    .panelNavigationRows(navigationRows(shown, hidden: hidden, fitted: fitted,
+                                                         canFold: shown.count > max(fitted, kept.count)))
+                    .panelNavigationScroll(.oracles, proxy: proxy)
+                    // The row budget follows the rail's real height, so resizing the
+                    // window (or dragging the rail's edge) refits it.
+                    .onGeometryChange(for: Double.self) { $0.size.height } action: { listHeight = $0 }
                 }
-                // The row budget follows the rail's real height, so resizing the
-                // window (or dragging the rail's edge) refits it.
-                .onGeometryChange(for: Double.self) { $0.size.height } action: { listHeight = $0 }
             }
         }
         .frame(maxHeight: .infinity)
@@ -534,6 +541,35 @@ struct OracleGlobalRail: View {
         }
     }
 
+    private func navigationRows(_ shown: [Entry], hidden: Int, fitted: Int,
+                                canFold: Bool) -> [PanelNavigationRow] {
+        // Match the rendered Pinned / Active / Idle bands, not the pre-grouped pool.
+        let ordered = shown.filter(\.pinned) + shown.filter { $0.live && !$0.pinned }
+            + shown.filter { !$0.live && !$0.pinned }
+        var rows = ordered.map { entry in
+            let meta = entry.meta
+            var actions = [
+                PanelRowAction(id: "pin", label: entry.pinned ? "Unpin" : "Pin",
+                               perform: { model.togglePinned(meta.id) }),
+                PanelRowAction(id: "rename", label: "Rename", perform: { renameText = meta.title; renaming = meta })
+            ]
+            if entry.live {
+                actions.append(PanelRowAction(id: "kill", label: "Kill Agent", perform: { model.killSession(meta.id) }))
+            }
+            actions.append(PanelRowAction(id: "delete", label: "Delete", perform: { confirmingDelete = meta }))
+            return PanelNavigationRow(id: meta.id, actions: actions,
+                                      isInitial: oracle.oracleSessionId == meta.id,
+                                      open: { oracle.reveal(); oracle.selectOracle(meta.id); oracle.focusChat() })
+        }
+        if hidden > 0 {
+            rows.append(PanelNavigationRow(id: "oracle-more", open: { showIdle = true; revealed += fitted }))
+        }
+        if canFold {
+            rows.append(PanelNavigationRow(id: "oracle-less", open: { showIdle = false; revealed = 0 }))
+        }
+        return rows
+    }
+
     /// A session row leads with its auto-derived title — the CLI's own model-written
     /// conversation title, picked up by the title poll (SessionTitle.swift) — so the
     /// rail reads as a list of conversations, not anonymous "Oracle N" slots. Until
@@ -558,6 +594,7 @@ struct OracleGlobalRail: View {
             onKill: model.isLive(meta.id) ? { model.killSession(meta.id) } : nil,
             onRename: { renameText = meta.title; renaming = meta },
             onDeleteRequested: { confirmingDelete = meta })
+            .id(meta.id).panelRowFocus(.oracles, id: meta.id)
     }
 
     /// Tiny uppercase divider between the Active and Idle groups.
@@ -591,6 +628,7 @@ struct OracleGlobalRail: View {
 /// menu and a ✕ that deletes after confirmation (the right-click menu mirrors the
 /// ellipsis).
 private struct OracleRailRow: View {
+    @Environment(AppModel.self) private var model
     let meta: SessionMeta
     let number: Int
     let selected: Bool
@@ -636,7 +674,7 @@ private struct OracleRailRow: View {
             // A pinned row says so at rest — the hover chip carries the state the
             // rest of the time, and a row sitting on top for no visible reason
             // reads as a bug.
-            if pinned, !hovering {
+            if pinned, !hovering, !model.panelNavigation.isFocused(.oracles, row: meta.id) {
                 Image(systemName: "pin.fill")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
@@ -697,7 +735,7 @@ private struct OracleRailRow: View {
     }
 
     @ViewBuilder private var hoverActions: some View {
-        if hovering {
+        if hovering || model.panelNavigation.isFocused(.oracles, row: meta.id) {
             RowHoverActions(menuContent: { AnyView(menuItems) },
                             menuHelp: "Oracle actions",
                             onTogglePin: onTogglePin,

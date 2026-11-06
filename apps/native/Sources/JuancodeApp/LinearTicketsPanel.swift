@@ -20,6 +20,7 @@ struct LinearTicketsRail: View {
     let root: String?
     @State private var draft = ""
     @State private var pickingTarget = false
+    @State private var workRequest: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -29,6 +30,7 @@ struct LinearTicketsRail: View {
             content
             Spacer(minLength: 0)
         }
+        .panelNavigationRows(navigationRows)
         .onAppear { draft = store.search }
         // Before the next frame, so the list never sits under the wrong repository.
         .onChange(of: root, initial: true) { store.setRoot(root) }
@@ -180,22 +182,48 @@ struct LinearTicketsRail: View {
                     .lineLimit(2).help(error.message)
                     .padding(.horizontal, 10).padding(.bottom, 2)
             }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(store.tickets) { LinearTicketRow(ticket: $0, start: store.startWork(for: $0)) }
-                    if store.hasMore {
-                        // Scrolling this into view is what asks for the next page.
-                        HStack {
-                            Spacer()
-                            ProgressView().controlSize(.mini)
-                            Spacer()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(store.tickets) { ticket in
+                            LinearTicketRow(ticket: ticket, start: store.startWork(for: ticket),
+                                            workRequest: $workRequest)
+                                .id(ticket.id).panelRowFocus(.linearTickets, id: ticket.id)
                         }
-                        .padding(.vertical, 6)
-                        .onAppear { Task { await store.loadMore() } }
+                        if store.hasMore {
+                            // Scrolling this into view is what asks for the next page.
+                            HStack {
+                                Spacer()
+                                ProgressView().controlSize(.mini)
+                                Spacer()
+                            }
+                            .padding(.vertical, 6)
+                            .onAppear { Task { await store.loadMore() } }
+                        }
                     }
+                    .padding(.horizontal, 4)
                 }
-                .padding(.horizontal, 4)
+                .panelNavigationScroll(.linearTickets, proxy: proxy)
             }
+        }
+    }
+
+    private var navigationRows: [PanelNavigationRow] {
+        switch store.source {
+        case .noProject, .unmapped: return []
+        case .all, .project: break
+        }
+        return store.tickets.map { ticket in
+            var actions = [PanelRowAction(id: "copy", label: "Copy Link", perform: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(ticket.url, forType: .string)
+            })]
+            if store.startWork(for: ticket).root != nil {
+                actions.append(PanelRowAction(id: "work", label: "Work on Ticket", perform: { workRequest = ticket.id }))
+            }
+            return PanelNavigationRow(id: ticket.id, actions: actions, open: {
+                if let url = URL(string: ticket.url) { NSWorkspace.shared.open(url) }
+            })
         }
     }
 
@@ -296,6 +324,7 @@ private struct LinearTicketRow: View {
     /// Where "Work on" starts, resolved from the list this row is shown in.
     let start: LinearStartWork
     @State private var hovering = false
+    @Binding var workRequest: String?
     /// Briefly true after the hover copy button, which then shows a checkmark.
     @State private var copied = false
 
@@ -320,7 +349,7 @@ private struct LinearTicketRow: View {
                 }
                 Spacer(minLength: 4)
                 priority
-                if hovering {
+                if hovering || model.panelNavigation.isFocused(.linearTickets, row: ticket.id) {
                     copyLinkButton
                     workOnButton
                 } else if let at = ticket.updatedAt {
@@ -351,6 +380,11 @@ private struct LinearTicketRow: View {
             if !ticket.branchName.isEmpty {
                 Button("Copy Branch Name") { copy(ticket.branchName) }
             }
+        }
+        .onChange(of: workRequest, initial: true) { _, id in
+            guard id == ticket.id else { return }
+            workRequest = nil
+            workOn()
         }
     }
 
