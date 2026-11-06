@@ -210,6 +210,72 @@ describe("durable session notifications", () => {
     expect((await store.inbox("parent"))[0]!.state).toBe("exited");
   });
 
+  it("ends dispatch alerts after completion while keeping explicit session watches", async () => {
+    const { store, deliver } = make();
+    await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+    await store.subscribe({ subscriber: "watcher", targetType: "session", targetId: "child" });
+    await store.publish(event("idle", false));
+    expect(await store.list("parent")).toHaveLength(1);
+    await store.publish(event("busy"));
+    await store.publish(event("waiting_input"));
+    expect(await store.list("parent")).toHaveLength(1);
+    await store.publish(event("busy"));
+    await store.publish(event("idle", false));
+    expect(await store.list("parent")).toEqual([]);
+    expect((await store.inbox("parent")).map((n) => n.state)).toEqual(["idle", "waiting_input"]);
+    deliver.mockClear();
+    await store.publish(event("idle"));
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    await store.publish({ sessionId: "child", state: "exited", notify: true });
+    expect(deliver.mock.calls.map(([id]) => id)).toEqual(["watcher", "watcher"]);
+  });
+
+  it.each(["idle", "exited", "failed"] as const)(
+    "retains the final %s dispatch alert for retry across restarts",
+    async (state) => {
+      const dir = mkdtempSync(join(tmpdir(), "dispatch-completion-"));
+      dirs.push(dir);
+      const path = join(dir, "notifications.sqlite");
+      const first = make(path);
+      first.deliver.mockRejectedValue(new Error("offline"));
+      await first.store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
+      await first.store.publish(event(state));
+      expect(await first.store.list()).toEqual([]);
+      const pending = (await first.store.inbox("parent"))[0]!;
+      expect(pending.delivered).toBe(false);
+      await first.store.close();
+      stores.splice(stores.indexOf(first.store), 1);
+      const second = make(path);
+      await second.store.retry();
+      await second.store.publish(event("busy"));
+      await second.store.publish(event("idle"));
+      await second.store.publish(event("exited"));
+      expect(second.deliver).toHaveBeenCalledTimes(1);
+      expect(await second.store.inbox("parent")).toEqual([
+        expect.objectContaining({ id: pending.id, state, delivered: true }),
+      ]);
+    },
+  );
+
+  it("retires a completed dispatch even when its final state is filtered out", async () => {
+    const { store, deliver } = make();
+    await store.subscribe({
+      subscriber: "parent",
+      targetType: "dispatch",
+      targetId: "dispatch-1",
+      states: ["waiting_input"],
+    });
+    await store.publish(event("idle"));
+    await store.publish(event("waiting_input"));
+    expect(await store.list()).toEqual([]);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
   it("persists subscriptions, failed delivery and dedupe across restarts", async () => {
     const dir = mkdtempSync(join(tmpdir(), "notification-test-"));
     dirs.push(dir);

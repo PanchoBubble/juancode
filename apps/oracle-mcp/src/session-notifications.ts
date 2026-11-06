@@ -191,6 +191,23 @@ export class SessionNotifications {
       return this.db.prepare("DELETE FROM subscriptions WHERE id = ?").run(id).changes > 0;
     });
   }
+  private advance(row: SessionSubscription, event: NotificationEvent, actionable: boolean): void {
+    // Dispatch alerts follow the dispatched turn. Keep explicit session watches
+    // persistent, but retire dispatch watches at completion so later turns and
+    // process-exit frames cannot wake the caller again. The final outbox entry
+    // survives retirement and can still be retried after a disconnect.
+    if (
+      row.targetType === "dispatch" &&
+      actionable &&
+      ["idle", "exited", "failed"].includes(event.state)
+    ) {
+      this.db.prepare("DELETE FROM subscriptions WHERE id = ?").run(row.id);
+    } else {
+      this.db
+        .prepare("UPDATE subscriptions SET last_state = ? WHERE id = ?")
+        .run(event.state, row.id);
+    }
+  }
   publish(event: NotificationEvent): Promise<void> {
     return this.serial(async () => {
       let output: string | undefined;
@@ -222,9 +239,7 @@ export class SessionNotifications {
           (row.mode === "done" && !["idle", "exited", "failed"].includes(event.state)) ||
           (row.mode === "includes" && event.state === "busy")
         ) {
-          this.db
-            .prepare("UPDATE subscriptions SET last_state = ? WHERE id = ?")
-            .run(event.state, row.id);
+          this.advance(row, event, actionable);
           continue;
         }
         if (output === undefined) {
@@ -240,9 +255,7 @@ export class SessionNotifications {
           row.mode === "includes" &&
           (outputError || !output.toLowerCase().includes(row.responseIncludes!.toLowerCase()))
         ) {
-          this.db
-            .prepare("UPDATE subscriptions SET last_state = ? WHERE id = ?")
-            .run(event.state, row.id);
+          this.advance(row, event, actionable);
           continue;
         }
         const notification: SessionNotification = {
@@ -264,9 +277,7 @@ export class SessionNotifications {
               "INSERT INTO notifications (id, subscription_id, subscriber, body) VALUES (?, ?, ?, ?)",
             )
             .run(notification.id, row.id, row.subscriber, JSON.stringify(notification));
-          this.db
-            .prepare("UPDATE subscriptions SET last_state = ? WHERE id = ?")
-            .run(event.state, row.id);
+          this.advance(row, event, actionable);
           this.db.exec("COMMIT");
         } catch (e) {
           this.db.exec("ROLLBACK");
