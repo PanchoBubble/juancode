@@ -147,6 +147,12 @@ struct RightRailPanels: View {
                                    height: frames[panel]?.height ?? geometry.size.height,
                                    alignment: .top)
                             .clipped()
+                            .overlay {
+                                if stacked {
+                                    Rectangle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
+                                        .allowsHitTesting(false)
+                                }
+                            }
                             .offset(y: frames[panel]?.minY ?? 0)
                             .modifier(RailDestinationVisibility(active: visible.contains(panel)))
                         }
@@ -161,8 +167,14 @@ struct RightRailPanels: View {
                                     min: min(60, (frame.height + next.height) / 3),
                                     max: frame.height + next.height - min(60, (frame.height + next.height) / 3),
                                     invert: false)
-                                    .offset(y: frame.maxY - 7)
+                                    .overlay {
+                                        Capsule().fill(Color.secondary.opacity(0.65))
+                                            .frame(width: 28, height: 3)
+                                            .allowsHitTesting(false)
+                                    }
+                                    .offset(y: frame.maxY + Self.stackGap / 2 - 7)
                                     .zIndex(2)
+                                    .help("Drag to resize \(panel.title) and \(visible[index + 1].title)")
                             }
                         }
                         if visible.isEmpty {
@@ -193,6 +205,8 @@ struct RightRailPanels: View {
 
     // MARK: Stacked layout
 
+    private static let stackGap: CGFloat = 10
+
     private var sizes: [String: Double] {
         guard let data = sizesRaw.data(using: .utf8),
               let values = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }
@@ -202,12 +216,13 @@ struct RightRailPanels: View {
     private func panelFrames(_ panels: [RightRailPanel], height: CGFloat) -> [RightRailPanel: CGRect] {
         let weights = panels.map { sizes[$0.rawValue] ?? 1 }
         let total = weights.reduce(0, +)
+        let contentHeight = max(0, height - (stacked ? Self.stackGap * CGFloat(max(0, panels.count - 1)) : 0))
         var y: CGFloat = 0
         var frames: [RightRailPanel: CGRect] = [:]
         for (index, panel) in panels.enumerated() {
-            let h = height * weights[index] / max(total, .leastNonzeroMagnitude)
+            let h = contentHeight * weights[index] / max(total, .leastNonzeroMagnitude)
             frames[panel] = CGRect(x: 0, y: y, width: 0, height: h)
-            y += h
+            y += h + (stacked ? Self.stackGap : 0)
         }
         return frames
     }
@@ -260,16 +275,20 @@ struct RightRailPanels: View {
 
     private func stackHeader(_ panel: RightRailPanel) -> some View {
         HStack(spacing: 5) {
-            Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
+            Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
             Label(panel.title, systemImage: panel.icon)
             Spacer(minLength: 0)
             Button { toggle(panel) } label: { Image(systemName: "xmark").font(.system(size: 9)) }
                 .buttonStyle(.plain).help("Hide \(panel.title)")
                 .accessibilityLabel("Hide \(panel.title)")
         }
-        .font(.system(size: 10, weight: .semibold))
-        .padding(.horizontal, 8).padding(.vertical, 7)
-        .background(Color.appBand)
+        .font(.system(size: 11, weight: .semibold))
+        .padding(.horizontal, 8).padding(.vertical, 8)
+        .background(Color.appPanelElevated)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.primary.opacity(0.16)).frame(height: 1)
+                .allowsHitTesting(false)
+        }
         .modifier(RailPanelReordering(panel: panel, order: stack.order, move: move))
     }
 
