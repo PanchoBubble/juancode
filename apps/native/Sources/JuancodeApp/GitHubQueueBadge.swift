@@ -595,7 +595,7 @@ struct GitHubQueueBadge: View {
                         .help(helpText)
                     if let base = pr.baseBranch, !base.isEmpty {
                         Image(systemName: base == "main" || base == "master"
-                              ? "arrow.triangle.merge" : "arrow.triangle.branch")
+                              ? "house.fill" : "arrow.triangle.branch")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .help("Targets \(base)")
