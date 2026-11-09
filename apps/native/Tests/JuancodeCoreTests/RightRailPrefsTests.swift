@@ -124,4 +124,44 @@ import Testing
         P.setOpen("worktree", true, in: d)
         #expect(P.isOpen("worktree", in: d))
     }
+    @Test func stackRestoresVisibilityAndOrderIndependentlyOfTabs() throws {
+        let (d, done) = try defaults()
+        defer { done() }
+        let stack = P.Stack().setting("tickets", shown: true).moving("tickets", before: "oracle")
+        P.storeStack(stack, in: d)
+        P.stored(P.State().showing("chains")).write(to: d)
+        #expect(P.stack(in: d) == stack)
+        #expect(P.stack(in: d).shown == ["tickets", "oracle", "prs"])
+        #expect(P.state(P.Stored(d)).destination == "chains")
+    }
+
+    @Test func stackedShortcutsPreserveOtherPanelsAndTheRail() throws {
+        let (d, done) = try defaults()
+        defer { done() }
+        d.set(true, forKey: P.stackedKey)
+        P.setOpen("worktree", true, in: d)
+        #expect(P.isOpen("worktree", in: d))
+        #expect(P.isOpen("oracle", in: d))
+        #expect(P.isOpen("prs", in: d))
+        P.setOpen("worktree", false, in: d)
+        #expect(!P.isOpen("worktree", in: d))
+        #expect(P.isOpen("prs", in: d))
+        #expect(d.bool(forKey: P.railShownKey))
+        d.set(false, forKey: P.railShownKey)
+        P.setOpen("tickets", true, in: d)
+        #expect(P.isOpen("tickets", in: d))
+        #expect(P.isOpen("prs", in: d))
+    }
+
+    @Test func emptyStackAndMalformedPreferencesRestoreSafely() throws {
+        let (d, done) = try defaults()
+        defer { done() }
+        let empty = P.Stack(order: ["tickets", "garbage", "tickets"], visible: [])
+        P.storeStack(empty, in: d)
+        #expect(P.stack(in: d).shown.isEmpty)
+        #expect(P.stack(in: d).order == ["tickets", "worktree", "oracle", "prs", "chains"])
+        #expect(empty.moving("garbage", before: "oracle") == empty)
+        #expect(empty.setting("garbage", shown: true) == empty)
+    }
+
 }

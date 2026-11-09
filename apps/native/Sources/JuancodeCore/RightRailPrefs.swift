@@ -1,18 +1,7 @@
-// The right rail's stored navigation and the rules that change it.
-//
-// The rail shows one of two full-height views, chosen from a tab bar: Worktree (the
-// selected session's checkout: Files/Changes and File/Diff) or Overview (the global
-// queues). Overview shows exactly one queue at a time, picked from a compact
-// selector: Oracles, PRs, Tickets or Chains. So the rail always shows exactly one
-// destination: Worktree, or one Overview queue.
-//
-// Stored in UserDefaults as plain strings: the view, the Overview queue and the
-// selector's order (a comma list). Every queue is always in the selector; nothing
-// can be hidden, so no stored choice can make a destination unreachable.
-//
-// Schema 3 replaced the stacked accordion (schema 2), which itself folded the
-// standalone Diff panel (schema 1) into Worktree. `migrated` turns either into a
-// valid view and queue deterministically and drops the accordion's keys.
+// The right rail's persisted tab navigation and optional stacked layout.
+// Tabs show Worktree or one Overview queue. Stacking stores an independent order,
+// visible set and panel sizes, so switching modes preserves both arrangements.
+// Schema 3 tab migration still upgrades the older accordion and Diff layouts.
 
 import Foundation
 
@@ -20,6 +9,11 @@ public enum RightRailPrefs {
     public static let viewKey = "rightRail.view"
     public static let queueKey = "rightRail.queue"
     public static let orderKey = "rightRail.order"
+    /// Stacking is opt-in; existing tab navigation remains the default.
+    public static let stackedKey = "rightRail.stacked"
+    public static let visibleKey = "rightRail.stack.visible"
+    public static let stackOrderKey = "rightRail.stack.order"
+    public static let stackSizesKey = "rightRail.stack.sizes"
     public static let schemaKey = "rightRail.schema"
     public static let schema = 3
     /// Whether the rail itself is up; shared with the window's toolbar toggle.
@@ -184,14 +178,58 @@ public enum RightRailPrefs {
         return true
     }
 
+    /// Independent of tab selection so switching layouts preserves both setups.
+    public struct Stack: Equatable, Sendable {
+        public var order: [String]
+        public var visible: Set<String>
+        public var shown: [String] { order.filter(visible.contains) }
+
+        public init(order: [String] = [], visible: [String] = ["oracle", "prs"]) {
+            let all = [RightRailPrefs.worktree] + RightRailPrefs.queues
+            var unique: [String] = []
+            for name in order where all.contains(name) && !unique.contains(name) { unique.append(name) }
+            self.order = unique + all.filter { !unique.contains($0) }
+            self.visible = Set(visible.filter(all.contains))
+        }
+
+        public func setting(_ name: String, shown: Bool) -> Stack {
+            var next = self
+            guard order.contains(name) else { return next }
+            if shown { next.visible.insert(name) } else { next.visible.remove(name) }
+            return next
+        }
+
+        public func moving(_ name: String, before target: String) -> Stack {
+            guard name != target, order.contains(name), order.contains(target) else { return self }
+            var next = self
+            next.order.removeAll { $0 == name }
+            next.order.insert(name, at: next.order.firstIndex(of: target)!)
+            return next
+        }
+    }
+
+    public static func stack(in d: UserDefaults = .standard) -> Stack {
+        Stack(order: names(d.string(forKey: stackOrderKey) ?? ""),
+              visible: d.string(forKey: visibleKey).map(names) ?? ["oracle", "prs"])
+    }
+
+    public static func storeStack(_ stack: Stack, in d: UserDefaults = .standard) {
+        d.set(stack.order.joined(separator: ","), forKey: stackOrderKey)
+        d.set(stack.shown.joined(separator: ","), forKey: visibleKey)
+    }
+
     // MARK: - Shortcut entry points
 
-    /// Show `destination` (and the rail), or hide it. Hiding a destination that is
-    /// on screen hides the rail; hiding one that is not on screen changes nothing,
-    /// so a toggle never flips the user to a different view.
+    /// Show `destination` and the rail, or hide it. In stacked mode, other panels
+    /// stay visible. In tab mode, hiding the current destination hides the rail.
     public static func setOpen(_ destination: String, _ open: Bool, in d: UserDefaults = .standard) {
         migrate(d)
         let s = state(Stored(d))
+        if d.bool(forKey: stackedKey) {
+            storeStack(stack(in: d).setting(destination, shown: open), in: d)
+            if open { d.set(true, forKey: railShownKey) }
+            return
+        }
         if open {
             stored(s.showing(destination)).write(to: d)
             d.set(true, forKey: railShownKey)
@@ -202,7 +240,9 @@ public enum RightRailPrefs {
 
     /// Whether `destination` is what the rail shows right now.
     public static func isOpen(_ destination: String, in d: UserDefaults = .standard) -> Bool {
-        railShown(d) && state(Stored(d)).isVisible(destination)
+        railShown(d) && (d.bool(forKey: stackedKey)
+            ? stack(in: d).visible.contains(destination)
+            : state(Stored(d)).isVisible(destination))
     }
 
     static func railShown(_ d: UserDefaults) -> Bool {

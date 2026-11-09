@@ -1,15 +1,6 @@
-// The right rail: two full-height views behind a tab bar.
-//
-// - Worktree: the selected session's checkout (Files/Changes, File/Diff, Expand),
-//   with Commit / Push / Create PR on that checkout. Follows the selection.
-// - Overview: the global queues. A compact selector picks exactly one of Oracles,
-//   PRs, Tickets or Chains, and that queue fills the rest of the rail. The queues
-//   do not change with the selection (Tickets aside, which scopes to the project).
-//
-// Exactly one destination is on screen. The others stay mounted once visited, so
-// their scroll position, filters and review drafts survive a switch, but they are
-// invisible, take no clicks and give the keyboard back if they held it. Navigation
-// state and its migration from the old stacked layout live in `RightRailPrefs`.
+// The right rail supports full-height tabs and an optional stack of independently
+// visible, reorderable panels. Visited destinations stay mounted in either layout
+// so filters, scroll positions and review drafts survive navigation.
 
 import AppKit
 import SwiftUI
@@ -62,6 +53,10 @@ struct RightRailPanels: View {
     @AppStorage(RightRailPrefs.viewKey) private var viewRaw: String?
     @AppStorage(RightRailPrefs.queueKey) private var queueRaw: String?
     @AppStorage(RightRailPrefs.orderKey) private var orderRaw: String?
+    @AppStorage(RightRailPrefs.stackedKey) private var stacked = false
+    @AppStorage(RightRailPrefs.visibleKey) private var visibleRaw: String?
+    @AppStorage(RightRailPrefs.stackOrderKey) private var stackOrderRaw: String?
+    @AppStorage(RightRailPrefs.stackSizesKey) private var sizesRaw = "{}"
     /// Commit / Push / Create PR on the selected checkout. Here so a write's note
     /// outlives a tab switch.
     @State private var gitStore = WorktreeGitStore()
@@ -102,33 +97,90 @@ struct RightRailPanels: View {
             + (model.changeStatBySession[ctx.sessionId]?.signature ?? "")
     }
 
+    private var stack: RightRailPrefs.Stack {
+        _ = (visibleRaw, stackOrderRaw)
+        return RightRailPrefs.stack()
+    }
+
+    private var visiblePanels: [RightRailPanel] {
+        if stacked { return stack.shown.compactMap(RightRailPanel.init(rawValue:)) }
+        return [RightRailPanel(rawValue: prefs.destination) ?? .worktree]
+    }
+
     var body: some View {
         let p = prefs
-        let active = RightRailPanel(rawValue: p.destination) ?? .worktree
+        let visible = visiblePanels
         VStack(spacing: 0) {
-            tabBar(p)
+            HStack(spacing: 0) {
+                if stacked { Text("Panels").font(.system(size: 11, weight: .semibold)).padding(.leading, 10) }
+                else { tabBar(p) }
+                Spacer(minLength: 0)
+                Button { stacked.toggle() } label: {
+                    Image(systemName: stacked ? "rectangle.split.1x2.fill" : "rectangle.split.1x2")
+                        .foregroundStyle(stacked ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+                .help(stacked ? "Use tabs" : "Stack panels together")
+                .accessibilityLabel(stacked ? "Use tabs" : "Stack panels together")
+            }
             Divider()
-            if p.view == .overview {
-                queueSelector(p, active: active)
+            if stacked {
+                stackSelector
+                Divider()
+            } else if p.view == .overview {
+                queueSelector(p, active: visible[0])
                 Divider()
             }
-            ZStack(alignment: .top) {
-                ForEach(RightRailPanel.allCases) { panel in
-                    if panel == active || mounted.contains(panel) {
-                        destination(panel)
-                            .modifier(RailPanelNavigation(panel: panel))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                            .modifier(RailDestinationVisibility(active: panel == active))
+            GeometryReader { geometry in
+                let frames = panelFrames(visible, height: geometry.size.height)
+                ZStack(alignment: .topLeading) {
+                    ForEach(RightRailPanel.allCases) { panel in
+                        if visible.contains(panel) || mounted.contains(panel) {
+                            VStack(spacing: 0) {
+                                if stacked { stackHeader(panel) }
+                                destination(panel)
+                                    .modifier(RailPanelNavigation(panel: panel))
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            }
+                            .frame(width: geometry.size.width,
+                                   height: frames[panel]?.height ?? geometry.size.height,
+                                   alignment: .top)
+                            .clipped()
+                            .offset(y: frames[panel]?.minY ?? 0)
+                            .modifier(RailDestinationVisibility(active: visible.contains(panel)))
+                        }
+                    }
+                    if stacked {
+                        ForEach(Array(visible.dropLast())) { panel in
+                            if let index = visible.firstIndex(of: panel),
+                               let frame = frames[panel], let next = frames[visible[index + 1]] {
+                                DragResizeHandle(axis: .horizontal,
+                                    value: sizeBinding(panel, next: visible[index + 1],
+                                                       firstHeight: frame.height, secondHeight: next.height),
+                                    min: min(60, (frame.height + next.height) / 3),
+                                    max: frame.height + next.height - min(60, (frame.height + next.height) / 3),
+                                    invert: false)
+                                    .offset(y: frame.maxY - 7)
+                                    .zIndex(2)
+                            }
+                        }
+                        if visible.isEmpty {
+                            Text("Choose panels above to show them here.")
+                                .font(.callout).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
                     }
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.appSurface)
-        .onChange(of: active, initial: true) { old, new in
-            mounted.insert(new)
-            if old != new { releaseKeyboard(leaving: old, for: new) }
+        .onChange(of: visible, initial: true) { old, new in
+            mounted.formUnion(new)
+            for panel in old where !new.contains(panel) {
+                releaseKeyboard(leaving: panel, for: new.first ?? .worktree)
+            }
         }
         // Branch state for the git actions: re-read when the checkout or its change
         // signature moves. The Worktree viewer reads the change itself.
@@ -137,6 +189,88 @@ struct RightRailPanels: View {
         // Tickets are project-scoped: the count follows the selected project even
         // while another destination is up.
         .onChange(of: root, initial: true) { ticketsStore.setRoot(root) }
+    }
+
+    // MARK: Stacked layout
+
+    private var sizes: [String: Double] {
+        guard let data = sizesRaw.data(using: .utf8),
+              let values = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }
+        return values.filter { $0.value.isFinite && $0.value > 0 }
+    }
+
+    private func panelFrames(_ panels: [RightRailPanel], height: CGFloat) -> [RightRailPanel: CGRect] {
+        let weights = panels.map { sizes[$0.rawValue] ?? 1 }
+        let total = weights.reduce(0, +)
+        var y: CGFloat = 0
+        var frames: [RightRailPanel: CGRect] = [:]
+        for (index, panel) in panels.enumerated() {
+            let h = height * weights[index] / max(total, .leastNonzeroMagnitude)
+            frames[panel] = CGRect(x: 0, y: y, width: 0, height: h)
+            y += h
+        }
+        return frames
+    }
+
+    private func sizeBinding(_ panel: RightRailPanel, next: RightRailPanel,
+                             firstHeight: Double, secondHeight: Double) -> Binding<Double> {
+        Binding(get: { firstHeight }, set: { height in
+            var values = sizes
+            let combined = (values[panel.rawValue] ?? 1) + (values[next.rawValue] ?? 1)
+            let fraction = height / max(firstHeight + secondHeight, 1)
+            values[panel.rawValue] = combined * fraction
+            values[next.rawValue] = combined * (1 - fraction)
+            if let data = try? JSONEncoder().encode(values), let raw = String(data: data, encoding: .utf8) {
+                sizesRaw = raw
+            }
+        })
+    }
+
+    private func toggle(_ panel: RightRailPanel) {
+        RightRailPrefs.storeStack(stack.setting(panel.rawValue, shown: !stack.visible.contains(panel.rawValue)))
+    }
+
+    private func move(_ panel: RightRailPanel, before target: RightRailPanel) {
+        RightRailPrefs.storeStack(stack.moving(panel.rawValue, before: target.rawValue))
+    }
+
+    private var stackSelector: some View {
+        HStack(spacing: 2) {
+            ForEach(stack.order.compactMap(RightRailPanel.init(rawValue:))) { panel in
+                let selected = stack.visible.contains(panel.rawValue)
+                Button { toggle(panel) } label: {
+                    ViewThatFits(in: .horizontal) {
+                        selectorLabel(panel, selected: selected, titled: true)
+                        selectorLabel(panel, selected: selected, titled: false)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 5)
+                    .contentShape(Rectangle())
+                    .background(RoundedRectangle(cornerRadius: 5)
+                        .fill(selected ? Color.appSelection : Color.clear))
+                }
+                .buttonStyle(.plain)
+                .help("\(selected ? "Hide" : "Show") \(panel.title). Drag to reorder; right-click for more.")
+                .accessibilityLabel(panel.title)
+                .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+                .modifier(RailPanelReordering(panel: panel, order: stack.order, move: move))
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 4)
+    }
+
+    private func stackHeader(_ panel: RightRailPanel) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
+            Label(panel.title, systemImage: panel.icon)
+            Spacer(minLength: 0)
+            Button { toggle(panel) } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                .buttonStyle(.plain).help("Hide \(panel.title)")
+                .accessibilityLabel("Hide \(panel.title)")
+        }
+        .font(.system(size: 10, weight: .semibold))
+        .padding(.horizontal, 8).padding(.vertical, 7)
+        .background(Color.appBand)
+        .modifier(RailPanelReordering(panel: panel, order: stack.order, move: move))
     }
 
     // MARK: Tabs
@@ -325,6 +459,39 @@ struct RightRailPanels: View {
                   editor.isEditable, !editor.isFieldEditor {
             model.focusTerminal()
         }
+    }
+}
+
+/// A typed prefix prevents text dragged from a terminal or ticket moving panels.
+private struct RailPanelReordering: ViewModifier {
+    let panel: RightRailPanel
+    let order: [String]
+    let move: (RightRailPanel, RightRailPanel) -> Void
+    @State private var targeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .draggable("juancode.rail." + panel.rawValue)
+            .dropDestination(for: String.self) { items, _ in
+                guard let raw = items.first, raw.hasPrefix("juancode.rail."),
+                      let source = RightRailPanel(rawValue: String(raw.dropFirst("juancode.rail.".count))),
+                      source != panel else { return false }
+                move(source, panel)
+                return true
+            } isTargeted: { targeted = $0 }
+            .overlay(alignment: .top) {
+                if targeted { Rectangle().fill(Color.accentColor).frame(height: 2).allowsHitTesting(false) }
+            }
+            .contextMenu {
+                if let index = order.firstIndex(of: panel.rawValue) {
+                    Button("Move Up") {
+                        if index > 0, let previous = RightRailPanel(rawValue: order[index - 1]) { move(panel, previous) }
+                    }.disabled(index == 0)
+                    Button("Move Down") {
+                        if index + 1 < order.count, let next = RightRailPanel(rawValue: order[index + 1]) { move(next, panel) }
+                    }.disabled(index == order.count - 1)
+                }
+            }
     }
 }
 
