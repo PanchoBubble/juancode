@@ -8,6 +8,7 @@ struct PrAgentPromptSheet: View {
     let cwd: String
 
     @State private var provider: ProviderId = .claude
+    @State private var selectedModel: String?
     @State private var prompt = ""
     @State private var creating = false
     @FocusState private var promptFocused: Bool
@@ -51,6 +52,12 @@ struct PrAgentPromptSheet: View {
             }
             .disabled(creating)
 
+            if provider == .claude || provider == .codex {
+                AgentModelPicker(provider: provider, selection: $selectedModel)
+                    .id(provider)
+                    .disabled(creating)
+            }
+
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
@@ -67,6 +74,7 @@ struct PrAgentPromptSheet: View {
         .padding(20)
         .frame(width: 480)
         .onAppear { promptFocused = true }
+        .onChange(of: provider) { _, _ in selectedModel = nil }
     }
 
     private func start() {
@@ -76,7 +84,8 @@ struct PrAgentPromptSheet: View {
         Task {
             let session = await model.create(
                 provider: provider, cwd: cwd, skipPermissions: true,
-                isolateWorktree: false, initialInput: "\(pr.url)\n\n\(prompt)")
+                isolateWorktree: false, initialInput: "\(pr.url)\n\n\(prompt)",
+                model: selectedModel)
             creating = false
             if session != nil { dismiss() }
         }
