@@ -23,6 +23,7 @@ struct OracleDock: View {
     /// shown. Shared with `RootView` (which mounts the rail) via the same @AppStorage
     /// key so the header toggle and the rail stay in lock-step.
     @AppStorage("oracle.sessionRail.shown") private var sessionRailShown = true
+    @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
     private static let minWidth: Double = 460
 
     /// Effective width: the user's persisted width if they ever dragged the edge,
@@ -145,6 +146,17 @@ struct OracleDock: View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles").foregroundStyle(.tint).padding(.leading, 12)
             Text("Oracle").font(.system(size: 13, weight: .semibold))
+            if let id = oracle.oracleSessionId,
+               let usage = model.sessions.first(where: { $0.id == id })?.usage,
+               let label = SessionUsageFormat.context(usage.contextPercent) ?? usage.badgeLabel {
+                Text(label)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(pressureTint(usage.contextPressure(handoffTokens: handoffTokens)))
+                    .lineLimit(1)
+                    .help((usage.badgeLabel ?? label)
+                        + (SessionHandoff.hint(usage, handoffTokens: handoffTokens)
+                            .map { "\n" + $0 } ?? ""))
+            }
             Spacer()
             headerButton("checklist", help: "Oracle tickets on the Beads board") {
                 model.openOracleBeads()
