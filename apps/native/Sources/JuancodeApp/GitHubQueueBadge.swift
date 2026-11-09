@@ -593,12 +593,13 @@ struct GitHubQueueBadge: View {
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(.secondary)
                         .help(helpText)
-                    if let base = pr.baseBranch, !base.isEmpty, base != "main" {
-                        Image(systemName: "arrow.triangle.branch")
+                    if let base = pr.baseBranch, !base.isEmpty {
+                        Image(systemName: base == "main" || base == "master"
+                              ? "arrow.triangle.merge" : "arrow.triangle.branch")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
-                            .help("Targets \(base) instead of main")
-                            .accessibilityLabel("Targets branch \(base) instead of main")
+                            .help("Targets \(base)")
+                            .accessibilityLabel("Targets branch \(base)")
                     }
                     // Always shown, not a hover action: being one of a stack is a
                     // fact about the PR, like its number.
