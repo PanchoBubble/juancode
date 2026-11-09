@@ -54,6 +54,11 @@ private let worktreeDefaultAllKey = "juancode.worktreeDefaultAll"
 /// cwd → `RunCommand.Pair.plist` (["main": …, "worktree": …]).
 private let runCommandByProjectKey = "juancode.runCommandByProject"
 
+/// UserDefaults keys for "Address comments": the edited prompt template, and each
+/// repo's (owner/name, lowercased) comment that makes its reviewer run again.
+private let addressCommentsTemplateKey = "juancode.addressComments.template"
+private let addressCommentsReviewCommandKey = "juancode.addressComments.reviewCommandByRepo"
+
 /// UserDefaults key for the user's saved custom dev ports in the Kill Port utility
 /// (added on top of the built-in suggestions).
 private let savedPortsKey = "juancode.killPort.savedPorts"
@@ -1881,6 +1886,39 @@ final class AppModel {
         }
     }
 
+    /// The prompt "Address comments" sends, as last edited; the built-in one until then.
+    var addressCommentsTemplate: String =
+        UserDefaults.standard.string(forKey: addressCommentsTemplateKey)
+            ?? PrAddressComments.defaultTemplate {
+        didSet {
+            // The default is not stored, so an improved built-in reaches everyone who
+            // never customised it.
+            if addressCommentsTemplate == PrAddressComments.defaultTemplate {
+                UserDefaults.standard.removeObject(forKey: addressCommentsTemplateKey)
+            } else {
+                UserDefaults.standard.set(addressCommentsTemplate, forKey: addressCommentsTemplateKey)
+            }
+        }
+    }
+
+    /// Per repo, the comment that re-triggers its reviewer (`/review` in luma-core).
+    var addressCommentsReviewCommands: [String: String] =
+        UserDefaults.standard.dictionary(forKey: addressCommentsReviewCommandKey)
+            as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(addressCommentsReviewCommands, forKey: addressCommentsReviewCommandKey) }
+    }
+
+    func addressCommentsReviewCommand(forRepo repo: String) -> String {
+        addressCommentsReviewCommands[repo.lowercased()] ?? ""
+    }
+
+    func setAddressCommentsReviewCommand(_ command: String, forRepo repo: String) {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        var next = addressCommentsReviewCommands
+        next[repo.lowercased()] = trimmed.isEmpty ? nil : trimmed
+        addressCommentsReviewCommands = next
+    }
+
     /// The saved run commands for project `cwd` (empty when none are set).
     func runCommands(forProject cwd: String) -> RunCommand.Pair {
         runCommandsByProject[cwd] ?? .init()
@@ -3400,6 +3438,57 @@ final class AppModel {
             return
         }
         trackInBackground(prs, cwd: cwd)
+    }
+
+    /// Whether an agent started by "Address comments" is still alive on this PR.
+    func isAddressingComments(repo: String, number: Int) -> Bool {
+        let prefix = PrAddressComments.dispatchIdPrefix(repo: repo, number: number)
+        return sessions.contains { meta in
+            meta.dispatchId?.hasPrefix(prefix) == true && meta.kind == .agent
+                && meta.status != .exited && !meta.dormant && isLive(meta.id)
+        }
+    }
+
+    /// How a batch of "Address comments" would be split right now — what the sheet shows
+    /// and `addressComments` then acts on, from the same rules.
+    func addressCommentsPlan(_ prs: [PullRequest], repo: String, cwd: String) -> PrAddressComments.Plan {
+        PrAddressComments.plan(
+            numbers: prs.map(\.number),
+            isAddressing: { isAddressingComments(repo: repo, number: $0) },
+            isTracked: { trackedPr(cwd: cwd, number: $0) != nil })
+    }
+
+    /// One agent per PR, each on its own worktree and seeded with the filled-in prompt.
+    /// They start in the background — the selection stays where it is, like a dispatch —
+    /// and the ones the plan leaves out are named, not dropped silently.
+    func addressComments(_ prs: [PullRequest], repo: String, cwd: String,
+                         template: String, reviewCommand: String,
+                         provider: ProviderId, model: String?) {
+        addressCommentsTemplate = template
+        setAddressCommentsReviewCommand(reviewCommand, forRepo: repo)
+        let plan = addressCommentsPlan(prs, repo: repo, cwd: cwd)
+        let byNumber = Dictionary(prs.map { ($0.number, $0) }, uniquingKeysWith: { a, _ in a })
+        let known = prs + viewerPrs.rows.map(\.pr)
+        if !plan.skipped.isEmpty {
+            errorMessage = "Skipped " + plan.skipped.map { "#\($0.number) (\($0.why.label))" }
+                .joined(separator: ", ") + "."
+        }
+        guard !plan.start.isEmpty else { return }
+        Task {
+            for number in plan.start {
+                guard let pr = byNumber[number] else { continue }
+                let siblings = PrStack.containing(pr, in: known)?.numbers.filter { $0 != number } ?? []
+                let prompt = PrAddressComments.prompt(
+                    template: template, pr: pr, repo: repo,
+                    reviewCommand: reviewCommand, stackSiblings: siblings)
+                let nonce = String(UUID().uuidString.prefix(8)).lowercased()
+                _ = await create(
+                    provider: provider, cwd: cwd, skipPermissions: true, isolateWorktree: true,
+                    initialInput: prompt, select: false, model: model,
+                    worktreeName: "pr-\(number)-comments-\(nonce.prefix(4))",
+                    dispatchId: PrAddressComments.dispatchId(repo: repo, number: number, nonce: nonce))
+            }
+        }
     }
 
     /// Track a PR **in a session that already exists** — the session-row context

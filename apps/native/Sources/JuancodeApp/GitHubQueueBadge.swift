@@ -106,6 +106,7 @@ struct GitHubQueueBadge: View {
         /// its folds and scroll position across session switches.
         var revealsSelectedRepo = true
         @State private var agentPromptRow: ViewerPr?
+        @State private var addressRow: ViewerPr?
 
         private var queue: ViewerPrResult { model.viewerPrs }
         /// Rows whose tracking agent is waiting on you — part of what Needs you means.
@@ -232,6 +233,11 @@ struct GitHubQueueBadge: View {
             .sheet(item: $agentPromptRow) { row in
                 if let cwd = model.folder(forRepo: row.repo) {
                     PrAgentPromptSheet(pr: row.pr, cwd: cwd)
+                }
+            }
+            .sheet(item: $addressRow) { row in
+                if let cwd = model.folder(forRepo: row.repo) {
+                    PrAddressCommentsSheet(repo: row.repo, cwd: cwd, candidates: [row.pr])
                 }
             }
         }
@@ -450,6 +456,14 @@ struct GitHubQueueBadge: View {
                     help: "Agent: send the PR link and your prompt to a fresh agent session") {
                     agentPromptRow = row
                 })
+                if PrAddressComments.isEligible(pr, viewer: model.viewerPrs.viewer) {
+                    actions.append(QueueAction(
+                        id: "address", symbol: "checkmark.bubble", label: "Address comments",
+                        help: "Address comments: an agent works through the \(pr.unresolvedComments) unresolved thread\(pr.unresolvedComments == 1 ? "" : "s"), replies, resolves them and asks for a new review"
+                    ) {
+                        addressRow = row
+                    })
+                }
                 actions.append(QueueAction(id: "review", symbol: "text.bubble", label: "Review diff",
                     help: "Review: the PR's diff against its base in the full-width review — comment on lines, send them to its agent") {
                     showing = false
@@ -947,9 +961,14 @@ struct GitHubQueueBadge: View {
         let toggle: () -> Void
         let dismiss: () -> Void
         @State private var confirming = false
+        @State private var addressing = false
         @State private var hovering = false
 
         private var cwd: String? { model.folder(forRepo: repo) }
+        /// The PRs here an agent could answer: yours, with threads still open.
+        private var addressable: [PullRequest] {
+            rows.map(\.pr).filter { PrAddressComments.isEligible($0, viewer: model.viewerPrs.viewer) }
+        }
         private var untracked: [PullRequest] {
             guard let cwd else { return [] }
             return rows.map(\.pr).filter { model.trackedPr(cwd: cwd, number: $0.number) == nil }
@@ -990,6 +1009,7 @@ struct GitHubQueueBadge: View {
                 .help(collapsed ? "Show \(repo)'s PRs" : "Minimise \(repo)")
                 // Hover lights the whole bar (below), not a rounded chip on the name.
                 .pointerCursor()
+                addressComments
                 trackAll
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -1000,6 +1020,30 @@ struct GitHubQueueBadge: View {
             }
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.10), value: hovering)
+        }
+
+        /// One agent per PR of yours that has unresolved threads. Not Track: this is a
+        /// one-shot that answers what is open now, where a tracked PR keeps a standing
+        /// watch.
+        @ViewBuilder private var addressComments: some View {
+            let list = addressable
+            if let cwd, !list.isEmpty {
+                let threads = list.reduce(0) { $0 + $1.unresolvedComments }
+                Button { addressing = true } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark.bubble").font(.system(size: 9))
+                        Text("Address comments").font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundStyle(.orange)
+                    .fixedSize()
+                }
+                .buttonStyle(.borderless)
+                .help("Address the \(threads) unresolved thread\(threads == 1 ? "" : "s") on \(list.count) PR\(list.count == 1 ? "" : "s"): one agent each, which replies, resolves and asks for a new review")
+                .clickCursor()
+                .sheet(isPresented: $addressing) {
+                    PrAddressCommentsSheet(repo: repo, cwd: cwd, candidates: list)
+                }
+            }
         }
 
         @ViewBuilder private var trackAll: some View {
