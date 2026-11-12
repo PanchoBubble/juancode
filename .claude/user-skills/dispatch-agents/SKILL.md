@@ -1,6 +1,6 @@
 ---
 name: dispatch-agents
-description: Dispatch a task to a NEW, separate agent session (a real claude/codex/opencode pty in the juancode app, in its own git worktree) through juancode's Oracle — in ANY project. Use whenever the user says "dispatch an agent", "dispatch a session", "spin up / open / start a new session or agent for X", "hand this off to another agent", "fire off N agents to do …". This is NOT the in-process Agent/Task subagent tool — never satisfy a dispatch request with a subagent.
+description: Dispatch tasks to separate, real CLI sessions through juancode from any project. Use when the user asks to dispatch agents, start separate sessions, or hand work to another agent. Defaults to the calling agent's provider, with user overrides and task-specific switches. Use juancode rather than built-in subagents for these requests.
 ---
 
 # dispatch-agents
@@ -12,8 +12,27 @@ reaching for a subagent after the user said "dispatch", stop and use this instea
 
 The dispatch goes to the Oracle sidecar: `POST http://127.0.0.1:4281/api/dispatch`.
 
-Never pass `--model`, a shadow HOME/CODEX_HOME, or mcpServers overrides — the
-dispatched CLI inherits the user's environment untouched.
+Never inject a shadow HOME/CODEX_HOME or mcpServers overrides — the dispatched CLI
+inherits the user's environment untouched. Use the dispatch API's fields for choices
+it supports rather than constructing CLI flags yourself.
+
+## Provider choice
+
+- Follow the user's explicit provider choice first.
+- Otherwise use the provider of the agent making this dispatch: Claude Code →
+  `claude`, Codex → `codex`, OpenCode → `opencode`. A child dispatching more agents
+  defaults to its own provider in turn. This also works outside a juancode session;
+  use your own CLI identity, without needing a parent session id.
+- You may choose another provider when it better fits the task or an independent
+  perspective would help. Briefly state why when reporting the dispatch; no extra
+  confirmation is needed just to choose a provider within the authorized task.
+- Always pass the selected `provider` explicitly. Omission enables the sidecar's
+  automatic routing and does not guarantee the parent's provider. Do not infer the
+  provider from whichever session happens to be active in the app.
+
+Set `DISPATCH_PROVIDER` to that choice before using the examples below. Leave model
+selection to the sidecar unless the user specifies a model; then pass its `model`
+field together with the provider. `model:"default"` requests the CLI's own default.
 
 ## Procedure
 
@@ -30,9 +49,9 @@ dispatched CLI inherits the user's environment untouched.
      core") means the app IS up — proceed.
 
 2. **Resolve the project**: the repo the work belongs in, as an absolute path —
-   normally the main checkout, `git rev-parse --show-toplevel` (for a worktree, use
-   the main checkout: `dirname "$(git rev-parse --git-common-dir)"`). Use another path
-   only if the user named one.
+   normally the main checkout. `git rev-parse --path-format=absolute --git-common-dir`
+   gives its `.git` directory even from a worktree; use its parent directory. Use
+   another path only if the user named one.
 
 3. **Write the prompt** to the session scratchpad (never into the repo). The new
    session has fresh context, so make it self-contained:
@@ -47,7 +66,8 @@ dispatched CLI inherits the user's environment untouched.
    repo conventions — just point at anything easy to miss.
 
    ```bash
-   cat > "$SCRATCH/dispatch-<slug>.txt" <<'PROMPT'
+   DISPATCH_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/juancode-dispatch.XXXXXX")
+   cat > "$DISPATCH_SCRATCH/prompt.txt" <<'PROMPT'
    <the full prompt>
    PROMPT
    ```
@@ -56,18 +76,23 @@ dispatched CLI inherits the user's environment untouched.
 
    ```bash
    jq -n --arg project "<abs project path>" \
-         --arg from "${CLAUDE_CODE_SESSION_ID:-}" \
-         --rawfile prompt "$SCRATCH/dispatch-<slug>.txt" \
-     '{project:$project, prompt:$prompt, provider:"claude", worktree:true, fromSessionId:$from}' \
+         --arg provider "$DISPATCH_PROVIDER" \
+         --arg from "${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-}}" \
+         --rawfile prompt "$DISPATCH_SCRATCH/prompt.txt" \
+     '{project:$project, prompt:$prompt, provider:$provider, worktree:true, fromSessionId:$from}' \
      | curl -s -m 30 -X POST http://127.0.0.1:4281/api/dispatch \
          -H 'content-type: application/json' --data-binary @-
    ```
 
-   Optional fields: `provider` (`claude` | `codex` | `opencode`, default claude),
+   `provider` is the explicit choice above (`claude`, `codex`, `opencode`, or another
+   provider supported by the running sidecar). Optional fields:
    `worktree` (default here: true — set false only when the user wants it in the main
    checkout), `ticket` (a ticket id; enforces one live session per ticket — pass it
    whenever the work is a ticket). `fromSessionId` puts the new session in this
-   session's chain.
+   session's chain. Use your CLI session id (`CLAUDE_CODE_SESSION_ID` or
+   `CODEX_THREAD_ID` when available), or a known juancode session id. An empty id is
+   ignored; do not guess another session's id. Remove the temporary prompt directory
+   after the request has finished.
 
    Read the response as accepted-or-not:
 
@@ -108,8 +133,9 @@ dispatched CLI inherits the user's environment untouched.
 
 Use what the user asked for. If they didn't say, follow the target repo's own
 shipping rules from its CLAUDE.md/AGENTS.md (e.g. juancode ships straight to main;
-most work repos want a branch + PR). If those don't say either, default to: commit on a
-branch, push it, open a PR, do not merge.
+most work repos want a branch + PR). If neither authorizes publishing, have the child
+implement, validate, and report its changes; do not invent permission to push or open
+a PR.
 
 ## Several at once
 
@@ -118,3 +144,20 @@ dispatch, and give each a non-overlapping file lane in its prompt.
 
 Repo-specific wrappers: juancode's `dispatch-ticket` skill (bd tickets) builds on
 this one.
+
+## Global installation
+
+This directory is the shared source for both CLIs. From the main juancode checkout,
+install symlinks once so updates stay shared across all projects:
+
+```bash
+mkdir -p "$HOME/.claude/skills" "$HOME/.agents/skills"
+ln -s "$PWD/.claude/user-skills/dispatch-agents" "$HOME/.claude/skills/dispatch-agents"
+ln -s "$PWD/.claude/user-skills/dispatch-agents" "$HOME/.agents/skills/dispatch-agents"
+```
+
+Keep an existing link when it already points here; do not overwrite another skill.
+Add a short pointer in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`: dispatch requests
+use this skill and juancode sessions, default to the calling provider, and respect
+explicit provider choices or justified switches. Start a new CLI session after
+changing global instructions.

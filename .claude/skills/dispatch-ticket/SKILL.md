@@ -1,6 +1,6 @@
 ---
 name: dispatch-ticket
-description: Dispatch a bd (beads) ticket to a fresh, autonomous agent session that works it end-to-end on this repo — through juancode's Oracle, so the session is a real pty in the native app. Use when the user wants to hand a ticket to a separate session ("dispatch <id>", "spin up a session for <id>", "open a new session to do <id>") rather than working it in the current context.
+description: Dispatch a bd (beads) ticket to a fresh, autonomous agent session that works it end-to-end on this repo through juancode's Oracle. Use when the user asks to dispatch a ticket or start a separate session for it, rather than work it in the current context. Follows the shared dispatch-agents provider policy.
 ---
 
 # dispatch-ticket
@@ -9,7 +9,7 @@ Hand a bd ticket to a **separate, autonomous agent session** that implements it
 end-to-end, then commits and pushes. This keeps the _current_ session's context free.
 
 The dispatch goes through the Oracle (`POST 127.0.0.1:4281/api/dispatch`), so the
-session is a real `claude` pty in the native app: visible in the grid, steerable from
+session is a real CLI pty in the native app: visible in the grid, steerable from
 Telegram, isolated in its own git worktree. The generic mechanics (preflight, repo
 resolution, worktree flag, follow-up endpoints, concurrency cap) live in the
 user-scope **dispatch-agents** skill — read it if anything below is unclear. This
@@ -17,6 +17,9 @@ skill is the bd-ticket-shaped wrapper around it. Its source is tracked here at
 `.claude/user-skills/dispatch-agents/` (outside `.claude/skills/`, so it is not also
 a project skill); install it with
 `ln -s "$PWD/.claude/user-skills/dispatch-agents" ~/.claude/skills/dispatch-agents`.
+Codex uses the same source linked at `~/.agents/skills/dispatch-agents`. Follow its
+provider-choice rules: default to your own provider, honor the user's choice, and
+allow a justified switch. Set `DISPATCH_PROVIDER` to that choice; do not hardcode Claude.
 
 **Prime directive of this repo:** never inject a shadow HOME/CODEX_HOME or override
 mcpServers — the dispatched CLI inherits the environment untouched, exactly like a
@@ -76,9 +79,10 @@ or run `bd ready` and offer the top items. Never guess an id.
 
    ```bash
    jq -n --arg project "$(git rev-parse --show-toplevel)" --arg ticket "<id>" \
-         --arg from "${CLAUDE_CODE_SESSION_ID:-}" \
+         --arg provider "$DISPATCH_PROVIDER" \
+         --arg from "${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-}}" \
          --rawfile prompt "$SCRATCH/dispatch-<id>.txt" \
-     '{project:$project, prompt:$prompt, provider:"claude", worktree:true, ticket:$ticket, fromSessionId:$from}' \
+     '{project:$project, prompt:$prompt, provider:$provider, worktree:true, ticket:$ticket, fromSessionId:$from}' \
      | curl -s -m 30 -X POST http://127.0.0.1:4281/api/dispatch \
          -H 'content-type: application/json' --data-binary @-
    ```
