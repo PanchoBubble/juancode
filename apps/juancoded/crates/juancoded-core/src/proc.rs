@@ -84,7 +84,11 @@ mod imp {
             let n = n as usize;
             if n < capacity {
                 buf.truncate(n);
-                return buf.into_iter().filter(|p| *p > 0).map(|p| p as u32).collect();
+                return buf
+                    .into_iter()
+                    .filter(|p| *p > 0)
+                    .map(|p| p as u32)
+                    .collect();
             }
             capacity *= 2;
         }
@@ -162,7 +166,10 @@ mod imp {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            out.extend(text.split_ascii_whitespace().filter_map(|t| t.parse::<u32>().ok()));
+            out.extend(
+                text.split_ascii_whitespace()
+                    .filter_map(|t| t.parse::<u32>().ok()),
+            );
         }
         out
     }

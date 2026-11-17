@@ -404,6 +404,7 @@ fn tokens_of(tokens: Option<&Value>) -> TokenUsage {
             .pointer("/cache/write")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        cache_write_1h: 0,
         reasoning: n("reasoning"),
     }
 }
@@ -539,6 +540,7 @@ mod tests {
                     output: 201,
                     cache_read: 0,
                     cache_write: 24472,
+                    cache_write_1h: 0,
                     reasoning: 0,
                 }
             }

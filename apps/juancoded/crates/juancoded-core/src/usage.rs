@@ -116,7 +116,17 @@ impl UsageFold {
                     next.context_tokens =
                         Some((usage.input + usage.cache_read + usage.cache_write) as i64);
                     let model = self.last_model.as_deref().unwrap_or_default();
-                    next.context_window = pricing::context_window(model);
+                    // Claude Code's transcript ids never carry `[1m]`, so a session that has
+                    // held more than its family window is running the long one, and stays so.
+                    let family = pricing::context_window(model);
+                    let long = family.is_some()
+                        && (next.context_window == Some(pricing::LONG_CONTEXT_WINDOW)
+                            || matches!((family, next.context_tokens), (Some(w), Some(c)) if c > w));
+                    next.context_window = if long {
+                        Some(pricing::LONG_CONTEXT_WINDOW)
+                    } else {
+                        family
+                    };
                     // A request whose step was announced in an earlier batch (restart)
                     // leaves the row's model alone rather than blanking it.
                     if self.last_model.is_some() {
@@ -128,6 +138,7 @@ impl UsageFold {
                         usage.output,
                         usage.cache_read,
                         usage.cache_write,
+                        usage.cache_write_1h,
                     ) {
                         Some(cost) if self.cost_known => {
                             next.cost_usd = Some(next.cost_usd.unwrap_or(0.0) + cost);
@@ -192,6 +203,7 @@ mod tests {
                 output,
                 cache_read,
                 cache_write,
+                cache_write_1h: 0,
                 reasoning: 0,
             },
         }
@@ -237,6 +249,33 @@ mod tests {
         assert_eq!(u.context_window, Some(200_000));
         let expected = (10.0 * 3.0 + 30.0 * 0.3 + 40.0 * 3.75 + 20.0 * 15.0) / 1_000_000.0;
         assert!((u.cost_usd.unwrap() - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_claude_session_past_its_family_window_is_on_the_long_one_and_stays() {
+        // Claude Code writes `claude-opus-5-5`, never `[1m]`, even on a 1M session.
+        let mut fold = UsageFold::resuming(None);
+        let big = fold
+            .apply(
+                None,
+                &[
+                    record(1, step("claude-opus-5-5")),
+                    record(2, usage(0, 10, 300_000, 0)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(big.context_window, Some(1_000_000));
+        // A compaction drops the context back under 200k; the window does not shrink.
+        let after = fold
+            .apply(
+                Some(&big),
+                &[
+                    record(3, step("claude-opus-5-5")),
+                    record(4, usage(0, 10, 50_000, 0)),
+                ],
+            )
+            .unwrap();
+        assert_eq!(after.context_window, Some(1_000_000));
     }
 
     #[test]

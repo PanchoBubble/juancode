@@ -24,10 +24,11 @@ pub struct ModelPrice {
     pub context_window: i64,
 }
 
-/// Cache reads bill at ~0.1x input and cache writes at ~1.25x input (the default
-/// 5-minute TTL).
+/// Cache reads bill at ~0.1x input; cache writes at ~1.25x input on the 5-minute TTL
+/// and ~2x on the 1-hour one, which Claude Code mostly uses.
 pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
 pub const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+pub const CACHE_WRITE_1H_MULTIPLIER: f64 = 2.0;
 
 /// Window of the long-context variants, which advertise it in the model id
 /// (`claude-opus-5[1m]`).
@@ -101,12 +102,18 @@ pub fn turn_cost(
     output: u64,
     cache_read: u64,
     cache_write: u64,
+    cache_write_1h: u64,
 ) -> Option<f64> {
     let p = price(model)?;
     Some(
         (input as f64 * p.input_per_mtok
             + cache_read as f64 * p.input_per_mtok * CACHE_READ_MULTIPLIER
-            + cache_write as f64 * p.input_per_mtok * CACHE_WRITE_MULTIPLIER
+            + cache_write.saturating_sub(cache_write_1h) as f64
+                * p.input_per_mtok
+                * CACHE_WRITE_MULTIPLIER
+            + cache_write_1h.min(cache_write) as f64
+                * p.input_per_mtok
+                * CACHE_WRITE_1H_MULTIPLIER
             + output as f64 * p.output_per_mtok)
             / 1_000_000.0,
     )
@@ -144,7 +151,7 @@ mod tests {
 
     #[test]
     fn an_unpriced_model_has_neither_a_cost_nor_a_window() {
-        assert!(turn_cost("fake-model", 100, 100, 0, 0).is_none());
+        assert!(turn_cost("fake-model", 100, 100, 0, 0, 0).is_none());
         assert!(context_window("fake-model").is_none());
     }
 
@@ -157,9 +164,13 @@ mod tests {
             1_000_000,
             1_000_000,
             1_000_000,
+            0,
         )
         .unwrap();
         assert!((cost - (3.0 + 15.0 + 0.3 + 3.75)).abs() < 1e-9, "{cost}");
+        // Half the write on the 1-hour TTL: 0.5M at 1.25x + 0.5M at 2x.
+        let split = turn_cost("claude-sonnet-5", 0, 0, 0, 1_000_000, 500_000).unwrap();
+        assert!((split - (1.875 + 3.0)).abs() < 1e-9, "{split}");
     }
 
     #[test]

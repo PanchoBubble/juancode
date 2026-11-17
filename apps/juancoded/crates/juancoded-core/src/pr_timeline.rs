@@ -26,7 +26,11 @@ use crate::gh_convo::{
 /// One entry of the merged timeline. Inline threads are deliberately not in here: they
 /// stay grouped under the review that opened them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PrTimelineItem {
     Comment {
         /// Namespaced, so a comment, a review and a commit can never collide even if
@@ -303,7 +307,11 @@ mod tests_support {
         }
     }
 
-    pub(super) fn thread(id: &str, resolved: bool, comments: Vec<PrConversationComment>) -> PrReviewThread {
+    pub(super) fn thread(
+        id: &str,
+        resolved: bool,
+        comments: Vec<PrConversationComment>,
+    ) -> PrReviewThread {
         PrReviewThread {
             id: id.into(),
             is_resolved: resolved,
@@ -313,7 +321,6 @@ mod tests_support {
             comments,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -524,7 +531,12 @@ mod wire_tests {
             &[],
         );
         let json = serde_json::to_string(&items).expect("serialises");
-        for key in ["\"kind\"", "\"createdAt\"", "\"threadGroups\"", "\"comment\""] {
+        for key in [
+            "\"kind\"",
+            "\"createdAt\"",
+            "\"threadGroups\"",
+            "\"comment\"",
+        ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }
         assert!(

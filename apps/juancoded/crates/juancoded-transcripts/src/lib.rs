@@ -72,6 +72,10 @@ pub struct TokenUsage {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// The part of `cache_write` written at the 1-hour TTL, which bills higher than the
+    /// 5-minute one. Zero for a CLI that does not split it out.
+    #[serde(default)]
+    pub cache_write_1h: u64,
     pub reasoning: u64,
 }
 

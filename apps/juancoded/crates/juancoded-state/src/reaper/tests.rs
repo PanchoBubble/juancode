@@ -148,7 +148,10 @@ fn idle_before_the_window_is_served_holds() {
 
 #[test]
 fn all_clear_for_the_full_window_is_eligible() {
-    assert_eq!(walk(WINDOW_MS, SWEEP_MS, |_| idle_sample()), Verdict::Eligible);
+    assert_eq!(
+        walk(WINDOW_MS, SWEEP_MS, |_| idle_sample()),
+        Verdict::Eligible
+    );
 }
 
 /// The gap rule. Every stride is longer than `max_sample_gap_ms`, so the streak keeps
@@ -314,7 +317,10 @@ fn an_unchanged_transcript_stays_eligible() {
 /// An unlocatable transcript is no evidence of activity; the other signals guard.
 #[test]
 fn a_missing_transcript_does_not_block() {
-    assert_eq!(walk(WINDOW_MS, SWEEP_MS, |_| idle_sample()), Verdict::Eligible);
+    assert_eq!(
+        walk(WINDOW_MS, SWEEP_MS, |_| idle_sample()),
+        Verdict::Eligible
+    );
 }
 
 // MARK: - output and the detector's memory are liveness, keystrokes are not
@@ -614,7 +620,12 @@ mod sweep {
 
     impl SessionsApi for Fake {
         fn ids(&self) -> Vec<String> {
-            self.probes.lock().unwrap().iter().map(|p| p.id.clone()).collect()
+            self.probes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.id.clone())
+                .collect()
         }
 
         fn sessions(&self) -> Vec<SessionMeta> {
@@ -630,7 +641,12 @@ mod sweep {
         }
 
         fn reap_probe(&self, id: &str) -> Option<ReapProbe> {
-            self.probes.lock().unwrap().iter().find(|p| p.id == id).cloned()
+            self.probes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
         }
 
         fn mark_dormant(&self, id: &str) -> bool {
@@ -887,7 +903,11 @@ mod sweep {
         // The rest are not lost — they keep their streaks and the next sweep takes
         // them, so reclaiming a backlog is a visible trickle rather than a batch.
         let busy_sweeps: Vec<&Vec<String>> = per_sweep.iter().filter(|s| !s.is_empty()).collect();
-        assert_eq!(busy_sweeps.len(), 2, "six sessions over two sweeps: {per_sweep:?}");
+        assert_eq!(
+            busy_sweeps.len(),
+            2,
+            "six sessions over two sweeps: {per_sweep:?}"
+        );
         assert_eq!(rig.fake.killed().len(), 6);
     }
 
@@ -974,7 +994,11 @@ mod sweep {
     #[test]
     fn the_cap_sleeps_the_least_recently_active_with_the_window_off() {
         let rig = rig(
-            vec![probe("old", T0 - 5_000), probe("new", T0), probe("mid", T0 - 1_000)],
+            vec![
+                probe("old", T0 - 5_000),
+                probe("new", T0),
+                probe("mid", T0 - 1_000),
+            ],
             0,
             2,
         );

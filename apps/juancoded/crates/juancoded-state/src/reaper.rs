@@ -307,7 +307,9 @@ pub fn evaluate(
     // Output as a rate, for the same reason as CPU and with the same floor: what the
     // pty says is liveness for a session nobody types at, but a repainting TUI must
     // not be able to hold a session alive forever.
-    let output_delta = sample.output_bytes.saturating_sub(base.last_sample_output_bytes);
+    let output_delta = sample
+        .output_bytes
+        .saturating_sub(base.last_sample_output_bytes);
     let output_moved = output_delta >= policy.output_floor_bytes
         && (output_delta as i128) * 1_000
             > (interval_ms as i128) * (policy.output_busy_bytes_per_sec as i128);
@@ -701,8 +703,14 @@ impl SessionReaper {
         // Most-dormant first, so a capped sweep reclaims the stalest RAM and the order
         // is deterministic (id breaks ties) rather than map-iteration-dependent.
         eligible.sort_by(|a, b| {
-            let ka = (a.2.as_ref().map(|b| b.idle_since_ms).unwrap_or(now), &a.0.id);
-            let kb = (b.2.as_ref().map(|b| b.idle_since_ms).unwrap_or(now), &b.0.id);
+            let ka = (
+                a.2.as_ref().map(|b| b.idle_since_ms).unwrap_or(now),
+                &a.0.id,
+            );
+            let kb = (
+                b.2.as_ref().map(|b| b.idle_since_ms).unwrap_or(now),
+                &b.0.id,
+            );
             ka.cmp(&kb)
         });
 
@@ -754,7 +762,12 @@ impl SessionReaper {
 
     /// Everything the policy reads about one session, assembled in one place so the
     /// sweep's decision and its kill-time re-check cannot drift apart.
-    fn sample(&self, probe: &ReapProbe, pid: u32, transcript_size_bytes: Option<u64>) -> ReapSample {
+    fn sample(
+        &self,
+        probe: &ReapProbe,
+        pid: u32,
+        transcript_size_bytes: Option<u64>,
+    ) -> ReapSample {
         ReapSample {
             activity: probe.activity,
             resumable: probe.cli_session_id.is_some(),
@@ -864,13 +877,13 @@ impl SessionReaper {
         );
         if let Some(base) = baseline {
             let interval = (now - base.last_sample_ms).max(1);
-            let permille =
-                (sample.cpu_time_ms.saturating_sub(base.last_sample_cpu_ms) as i64) * 1_000
-                    / interval;
-            let delta = sample.output_bytes.saturating_sub(base.last_sample_output_bytes);
-            out.push_str(&format!(
-                " cpuPermille={permille} outputDeltaBytes={delta}"
-            ));
+            let permille = (sample.cpu_time_ms.saturating_sub(base.last_sample_cpu_ms) as i64)
+                * 1_000
+                / interval;
+            let delta = sample
+                .output_bytes
+                .saturating_sub(base.last_sample_output_bytes);
+            out.push_str(&format!(" cpuPermille={permille} outputDeltaBytes={delta}"));
         }
         if let Some(size) = sample.transcript_size_bytes {
             out.push_str(&format!(" transcriptBytes={size}"));
@@ -880,7 +893,14 @@ impl SessionReaper {
 
     /// One line per sweep, whether or not anything died: the denominator that makes
     /// the sleep lines readable.
-    fn log_sweep(&self, live: usize, eligible: usize, reaped: usize, capped: usize, deferred: usize) {
+    fn log_sweep(
+        &self,
+        live: usize,
+        eligible: usize,
+        reaped: usize,
+        capped: usize,
+        deferred: usize,
+    ) {
         if live == 0 {
             return;
         }
@@ -955,7 +975,10 @@ impl SessionReaper {
                 );
                 continue;
             }
-            let last_active = probe.updated_at.max(probe.last_input_ms).max(probe.last_output_ms);
+            let last_active = probe
+                .updated_at
+                .max(probe.last_input_ms)
+                .max(probe.last_output_ms);
             self.sleep(&id, SleepReason::LiveCap, || {
                 format!(
                     "activity={} maxLive={max_live} liveCount={live_count} lastActiveMs={}",

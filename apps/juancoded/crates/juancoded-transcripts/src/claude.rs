@@ -437,6 +437,10 @@ fn usage_of(usage: Option<&Value>) -> TokenUsage {
         output: n("output_tokens"),
         cache_read: n("cache_read_input_tokens"),
         cache_write: n("cache_creation_input_tokens"),
+        cache_write_1h: usage
+            .pointer("/cache_creation/ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         reasoning: usage
             .pointer("/output_tokens_details/thinking_tokens")
             .and_then(Value::as_u64)
@@ -501,7 +505,7 @@ mod tests {
 
     #[test]
     fn one_request_split_across_lines_announces_its_step_and_cost_once() {
-        let usage = r#""usage":{"input_tokens":2,"output_tokens":313,"cache_read_input_tokens":27982,"cache_creation_input_tokens":22602,"output_tokens_details":{"thinking_tokens":43}}"#;
+        let usage = r#""usage":{"input_tokens":2,"output_tokens":313,"cache_read_input_tokens":27982,"cache_creation_input_tokens":22602,"cache_creation":{"ephemeral_1h_input_tokens":20000},"output_tokens_details":{"thinking_tokens":43}}"#;
         let out = events(&[
             &format!(
                 r#"{{"type":"assistant","requestId":"req_1","message":{{"model":"m",{usage},"content":[{{"type":"thinking","thinking":"hm","signature":"sig"}}],"stop_reason":"tool_use"}}}}"#
@@ -524,6 +528,7 @@ mod tests {
                         output: 313,
                         cache_read: 27982,
                         cache_write: 22602,
+                        cache_write_1h: 20000,
                         reasoning: 43,
                     }
                 },
