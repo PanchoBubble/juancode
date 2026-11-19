@@ -567,7 +567,8 @@ const PROMPT_PATTERNS: &[PromptPattern] = &[
     PromptPattern {
         label: "esc-cancel",
         bottom_only: true,
-        matches: |s| lower_contains(s, "(esc to cancel)"),
+        // Current Claude dialogs (trust, AskUserQuestion) print "Esc to cancel" without the parens.
+        matches: |s| lower_contains(s, "esc to cancel"),
     },
 ];
 
@@ -914,6 +915,27 @@ mod tests {
             })
         );
         assert_eq!(det.last_prompt(), Some("do-you-want"));
+    }
+
+    #[test]
+    fn current_claude_trust_dialog_and_ask_user_question_are_prompts() {
+        // Captured from Claude Code 2.1.327: the trust menu has no numbers and no "(esc to cancel)".
+        let trust = " Quick safety check: Is this a project you created or one you trust?\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel";
+        let ask = " ☐ Color\n\nWhich color do you prefer?\n\n❯ 1. Red\n     Choose red\n  2. Green\n  4. Type something.\n  5. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel";
+        for screen in [trust, ask] {
+            let mut det = ActivityDetector::new();
+            let armed = det.on_output(screen.as_bytes(), || ScreenText::new(screen, screen));
+            let t = det
+                .settle(
+                    armed.armed.unwrap().generation,
+                    false,
+                    &ScreenText::new(screen, screen),
+                )
+                .transition
+                .expect(screen);
+            assert_eq!(t.state, SessionActivity::WaitingInput);
+            assert!(t.notify);
+        }
     }
 
     #[test]
