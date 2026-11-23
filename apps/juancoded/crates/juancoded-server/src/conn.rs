@@ -1086,6 +1086,7 @@ fn handle_client_message(
                 preset: preset.filter(|p| !p.is_empty()),
                 isolate_worktree: isolate_worktree.unwrap_or(false),
                 worktree_name: worktree_name.filter(|n| !n.is_empty()),
+                checkout_branch: None,
                 dispatch_id,
                 owner: client,
             };
@@ -2641,6 +2642,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: false,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             })
@@ -2839,6 +2841,7 @@ mod tests {
                     preset: None,
                     isolate_worktree: false,
                     worktree_name: None,
+                    checkout_branch: None,
                     dispatch_id: None,
                     owner: 1,
                 })

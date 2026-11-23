@@ -161,6 +161,10 @@ pub struct CreateRequest {
     /// numbers a family of trees off one question — and an unusable one is refused
     /// rather than silently replaced, same as any other part of the isolation promise.
     pub worktree_name: Option<String>,
+    /// With `isolate_worktree`: check this EXISTING branch out into a pool slot
+    /// instead of cutting `juancode/<name>` (a tracked PR's head branch). The slot is
+    /// recorded like any other, so deleting the session gives it back.
+    pub checkout_branch: Option<String>,
     pub dispatch_id: Option<String>,
     /// The connection that will drive this session's grid. It claims ownership up
     /// front: the client that spawned a session at a size owns that size.
@@ -947,8 +951,10 @@ impl SessionRegistry {
                 .worktree_name
                 .clone()
                 .unwrap_or_else(|| id.chars().take(8).collect::<String>());
-            let made =
-                self.with_pool(|pool| worktree::pool::create_timed(&req.cwd, &name, pool))?;
+            let made = self.with_pool(|pool| match &req.checkout_branch {
+                Some(branch) => worktree::pool::checkout_timed(&req.cwd, branch, pool),
+                None => worktree::pool::create_timed(&req.cwd, &name, pool),
+            })?;
             Some((made, name))
         } else {
             None

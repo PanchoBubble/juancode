@@ -152,7 +152,14 @@ export function inspectWorktree(t, ctx) {
   const readable = statusOut !== null;
   const dirtyLines = (statusOut ?? "").split("\n").filter(Boolean);
 
-  const aheadMain = Number(git(t.path, ["rev-list", "--count", "origin/main..HEAD"], "0")) || 0;
+  // The remote's default branch, not a hardcoded main: bp-mock ships from `release`.
+  const base =
+    git(t.path, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], "") ||
+    "origin/main";
+  const aheadMain = Number(git(t.path, ["rev-list", "--count", `${base}..HEAD`], "0")) || 0;
+  // Commits no remote ref reaches: the only ones a removal would actually lose.
+  const unpushed =
+    Number(git(t.path, ["rev-list", "--count", "HEAD", "--not", "--remotes"], "0")) || 0;
 
   let pushed = null; // null = no remote branch
   if (t.branch) {
@@ -174,10 +181,12 @@ export function inspectWorktree(t, ctx) {
     detached: t.detached,
     locked: t.locked,
     isMain: t.path === repoRoot,
-    onMainBranch: t.branch === "main",
+    onMainBranch: t.branch === "main" || `origin/${t.branch}` === base,
     readable,
     dirty: dirtyLines.length,
+    base,
     aheadMain,
+    unpushed,
     pushed,
     pr: pr
       ? {

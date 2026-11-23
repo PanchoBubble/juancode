@@ -60,6 +60,7 @@ async fn main() {
                 preset: None,
                 isolate_worktree: isolate,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             }) {

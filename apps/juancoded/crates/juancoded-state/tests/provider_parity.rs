@@ -93,6 +93,7 @@ fn request(provider: ProviderId, cwd: &str) -> CreateRequest {
         preset: None,
         isolate_worktree: false,
         worktree_name: None,
+        checkout_branch: None,
         dispatch_id: None,
         owner: 1,
     }

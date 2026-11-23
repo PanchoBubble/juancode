@@ -187,18 +187,7 @@ pub fn create_on_branch(
     }
     let dir = dir.to_string_lossy().to_string();
 
-    // A PR branch pushed by somebody else may not exist locally at all. Best-effort:
-    // being offline must not stop the worktree being made, since the detached fallback
-    // still has whatever remote-tracking ref is already here.
-    let local = format!("refs/heads/{branch}");
-    let have_local = git(repo_cwd, &["rev-parse", "--verify", "--quiet", &local])
-        .is_some_and(|out| !out.trim().is_empty());
-    if !have_local {
-        let _ = Command::new("git")
-            .args(["fetch", "origin", branch])
-            .current_dir(repo_cwd)
-            .output();
-    }
+    let have_local = fetch_if_missing(repo_cwd, branch);
 
     if have_local && worktree_add(repo_cwd, &["worktree", "add", &dir, branch]) {
         link_node_modules(&root, &dir);
@@ -234,6 +223,25 @@ pub fn create_on_branch(
     Err(WorktreeError(format!(
         "Couldn't create a worktree for branch {branch}."
     )))
+}
+
+/// Whether `branch` is local; when it is not, `git fetch origin <branch>` so a
+/// checkout can track it.
+///
+/// A PR branch pushed by somebody else may not exist locally at all. Best-effort:
+/// being offline must not stop the worktree being made, since the detached fallback
+/// still has whatever remote-tracking ref is already here.
+pub fn fetch_if_missing(repo_cwd: &str, branch: &str) -> bool {
+    let local = format!("refs/heads/{branch}");
+    let have_local = git(repo_cwd, &["rev-parse", "--verify", "--quiet", &local])
+        .is_some_and(|out| !out.trim().is_empty());
+    if !have_local {
+        let _ = Command::new("git")
+            .args(["fetch", "origin", branch])
+            .current_dir(repo_cwd)
+            .output();
+    }
+    have_local
 }
 
 fn worktree_add(repo_cwd: &str, args: &[&str]) -> bool {

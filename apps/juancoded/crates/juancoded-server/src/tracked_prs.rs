@@ -253,25 +253,25 @@ impl TrackedPrs {
         // The agent works the PR on its own worktree with the PR's branch checked out,
         // so it never touches the main checkout and several tracked PRs can run at once.
         // The entry stays keyed by the REPO cwd while the session runs in the worktree.
-        // A repo git cannot give us a tree for — no remote, offline with an unknown
-        // branch, the branch open somewhere that refuses even a detached copy — is still
-        // tracked in the repo root rather than not tracked at all.
-        let worktree = self.pr_worktree(&req).await;
-        let cwd = worktree
-            .as_ref()
-            .map(|w| w.path.clone())
-            .unwrap_or_else(|| req.cwd.clone());
+        //
+        // A pool slot first, recorded on the session like any isolated start, so
+        // deleting the session gives the tree back and a full repo reclaims one rather
+        // than growing a `pr-N` tree per watch. When the pool cannot check the branch
+        // out (it is open in another tree) the old dedicated tree takes over, detached
+        // if it must; a repo git cannot give a tree at all is still tracked in its root.
         let stacked_on = gh::pr_stacked_on(&req.cwd, req.number).await;
-        let seed = track_seed_prompt(
-            req.number,
-            &req.title,
-            &req.branch,
-            &req.url,
-            worktree.as_ref(),
-            stacked_on.as_deref(),
-            has_pr_skill(&req.cwd),
-        );
-        let meta = match self.sessions.create(CreateRequest {
+        let seed_for = |worktree: Option<&BranchWorktree>| {
+            track_seed_prompt(
+                req.number,
+                &req.title,
+                &req.branch,
+                &req.url,
+                worktree,
+                stacked_on.as_deref(),
+                has_pr_skill(&req.cwd),
+            )
+        };
+        let request = |cwd: String, checkout_branch: Option<String>| CreateRequest {
             provider: ProviderId::Claude,
             cwd,
             cols: SPAWN_GRID.0,
@@ -282,19 +282,52 @@ impl TrackedPrs {
             skip_permissions: true,
             model: Some("opus".into()),
             preset: None,
-            // Already standing in the worktree above, which is the PR's branch rather
-            // than a fresh `juancode/<name>` one this flag would cut.
-            isolate_worktree: false,
-            worktree_name: None,
+            isolate_worktree: checkout_branch.is_some(),
+            worktree_name: checkout_branch
+                .is_some()
+                .then(|| format!("pr-{}", req.number)),
+            checkout_branch,
             dispatch_id: None,
             owner: req.owner,
-        }) {
-            Ok(meta) => meta,
+        };
+        let pooled = {
+            let sessions = Arc::clone(&self.sessions);
+            let pooled_req = request(req.cwd.clone(), Some(req.branch.clone()));
+            let (cwd, branch) = (req.cwd.clone(), req.branch.clone());
+            // Blocking git (a fetch among it), so off the runtime threads.
+            tokio::task::spawn_blocking(move || {
+                worktree::fetch_if_missing(&cwd, &branch);
+                sessions.create(pooled_req)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|made| made.map_err(|e| e.to_string()))
+        };
+        let (meta, worktree) = match pooled {
+            Ok(meta) => {
+                let worktree = meta.worktree_path.clone().map(|path| BranchWorktree {
+                    path,
+                    branch: Some(req.branch.clone()),
+                });
+                (meta, worktree)
+            }
             Err(e) => {
-                warn!(pr = req.number, "no session to track this PR with: {e}");
-                return None;
+                warn!(pr = req.number, "no pool slot for this PR: {e}");
+                let worktree = self.pr_worktree(&req).await;
+                let cwd = worktree
+                    .as_ref()
+                    .map(|w| w.path.clone())
+                    .unwrap_or_else(|| req.cwd.clone());
+                match self.sessions.create(request(cwd, None)) {
+                    Ok(meta) => (meta, worktree),
+                    Err(e) => {
+                        warn!(pr = req.number, "no session to track this PR with: {e}");
+                        return None;
+                    }
+                }
             }
         };
+        let seed = seed_for(worktree.as_ref());
 
         let entry = TrackedPr {
             id: key.clone(),
@@ -1143,6 +1176,47 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
+    /// A tracked PR stands in a pool slot recorded on its session, on the PR's branch,
+    /// so deleting the session gives the tree back instead of leaving a `pr-N` tree.
+    #[tokio::test]
+    async fn a_tracked_pr_takes_a_pool_slot_on_its_branch() {
+        let (engine, sessions) = engine();
+        let root = repo("pooled");
+        let cwd = root.to_string_lossy().to_string();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["branch", "feature"]);
+
+        let entry = engine
+            .track(TrackRequest {
+                branch: "feature".into(),
+                ..request(&cwd, 77)
+            })
+            .await
+            .expect("a watch");
+        let meta = sessions
+            .meta(entry.session_id.as_deref().expect("a session"))
+            .expect("the session");
+        let slot = meta
+            .worktree_path
+            .expect("the slot is recorded on the session");
+        assert!(worktree::pool::is_slot(&slot), "{slot}");
+        assert_eq!(meta.cwd, slot);
+        assert_eq!(
+            git(&["-C", &slot, "branch", "--show-current"]),
+            "feature",
+            "the slot is on the PR's branch"
+        );
+
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+
     /// The "Track PR in This Session" path: the watch goes into the session the user is
     /// already sitting in, and nothing else is spawned or cut. Both halves matter — a
     /// second agent on a tree of its own would be a rival committing to the same branch,
@@ -1163,6 +1237,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: false,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             })
@@ -1213,6 +1288,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: false,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             })

@@ -728,6 +728,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: false,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             })

@@ -66,13 +66,15 @@ export function decide(c, opts = {}) {
   // pushed === false: ahead of its own remote branch. pushed === null: there is
   // no remote branch at all, so gh has never seen it and neither has anyone
   // else. Both mean the commits live only in this tree.
-  if (c.aheadMain > 0 && c.pushed !== true) {
+  // Counted against every remote ref, not origin/main: a commit on any remote
+  // branch survives the tree's removal.
+  if (c.unpushed > 0) {
     const why = c.pushed === null ? "no origin branch" : `ahead of origin/${c.branch}`;
-    return keep("UNPUSHED", `${c.aheadMain} unpushed commit(s) (${why})`);
+    return keep("UNPUSHED", `${c.unpushed} unpushed commit(s) (${why})`);
   }
   if (c.aheadMain > 0 && !(c.pr && c.pr.merged)) {
     const pr = c.pr ? `PR #${c.pr.number} ${c.pr.state}` : "no PR";
-    return keep("UNMERGED", `${c.aheadMain} commit(s) not in origin/main (${pr})`);
+    return keep("UNMERGED", `${c.aheadMain} commit(s) not in ${c.base ?? "origin/main"} (${pr})`);
   }
   if (c.pr && c.pr.state === "OPEN" && !c.pr.merged) {
     return keep("PR_OPEN", `open PR #${c.pr.number}`);
@@ -87,7 +89,9 @@ export function decide(c, opts = {}) {
   }
 
   const settled =
-    c.pr && c.pr.merged ? `PR #${c.pr.number} merged` : "nothing ahead of origin/main";
+    c.pr && c.pr.merged
+      ? `PR #${c.pr.number} merged`
+      : `nothing ahead of ${c.base ?? "origin/main"}`;
   return {
     verdict: "remove",
     code: "STALE",
