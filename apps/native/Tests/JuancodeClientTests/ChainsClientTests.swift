@@ -98,6 +98,24 @@ final class ChainsClientTests: XCTestCase {
         }
     }
 
+    /// An answer is confirmed by the core's `handoffResult`; a refusal throws, so the
+    /// inbox can show it instead of leaving the question standing with no word.
+    func testClosingAHandoffAwaitsTheCoresResult() async throws {
+        let daemon = ChainDaemon()
+        try await withChainDaemon(daemon) { core in
+            try await core.closeHandoff("h-open", reason: "Option B")
+            do {
+                try await core.closeHandoff("h-closed", reason: "Option A")
+                XCTFail("a refusal must throw")
+            } catch let error as ChainError {
+                XCTAssertEqual(error.code, "handoff-closed")
+            }
+            let sent = daemon.frames(ofType: "closeHandoff")
+            XCTAssertEqual(sent.first?["closureReason"] as? String, "Option B")
+            XCTAssertNotNil(sent.first?["requestId"] as? String)
+        }
+    }
+
     /// A core that keeps no chains is sent nothing, hands a watcher an empty book, and
     /// refuses every write by name rather than pretending it landed.
     func testACoreWithoutTheCapabilityIsSentNothing() async throws {
@@ -134,7 +152,7 @@ private final class ChainDaemon: @unchecked Sendable {
                      "closedAt": NSNull(), "members": []],
     ]
 
-    var capabilities: [String] = ["inputAck", "resizeAck", "screen", "sessionMeta", "chains"]
+    var capabilities: [String] = ["inputAck", "resizeAck", "screen", "sessionMeta", "chains", "chainHandoffs"]
 
     var frames: [[String: Any]] { lock.withLock { received } }
 
@@ -176,6 +194,13 @@ private final class ChainDaemon: @unchecked Sendable {
                                      "addedAt": 3]]
                 book[slug] = chain
                 return [result("setMember"), chainJSON(["type": "chain", "chain": chain])]
+            case "closeHandoff":
+                // `h-closed` stands for a question another surface answered first.
+                let refused = frame["handoffId"] as? String == "h-closed"
+                var body: [String: Any] = ["type": "handoffResult", "op": "close", "ok": !refused]
+                body["requestId"] = frame["requestId"]
+                if refused { body["error"] = "handoff-closed" }
+                return [chainJSON(body)]
             case "deleteChain":
                 guard let slug, book.removeValue(forKey: slug) != nil else {
                     return [result("delete", "chain-not-found")]

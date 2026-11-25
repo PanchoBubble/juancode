@@ -80,8 +80,9 @@ extension RustCoreClient {
 
     /// One write, correlated on its `requestId`. Silence is a failure, never a success:
     /// a tag nobody confirmed has not landed.
-    private func chainWrite(_ frame: [String: Any]) async throws {
-        guard supports(.chains) else { throw ChainError("chain-unavailable") }
+    private func chainWrite(_ frame: [String: Any], needs: CoreCapability = .chains,
+                            unavailable: String = "chain-unavailable") async throws {
+        guard supports(needs) else { throw ChainError(unavailable) }
         let waiter = ChangesWaiter()
         let requestId = lock.withLock { () -> String in
             let id = "chain-\(nextChainId)"
@@ -153,6 +154,10 @@ public struct ChainError: LocalizedError, Equatable {
         case "chain-timeout": return "The core did not confirm the change, so it has not happened."
         case "chain-connection-lost":
             return "The connection to the core dropped before it confirmed the change."
+        case "handoff-unavailable": return "This core cannot record answers to questions."
+        case "handoff-not-found": return "That question no longer exists."
+        case "handoff-closed": return "Someone already answered this question differently."
+        case "handoff-closure-reason-required": return "An answer cannot be empty."
         default: return "The chain change failed (\(code))."
         }
     }
@@ -162,11 +167,11 @@ public struct ChainError: LocalizedError, Equatable {
 /// history is subscribed to and mirrored whole; the one write sent is `closeHandoff`,
 /// which answers a question to the human (juancode-8oa5.2).
 extension RustCoreClient {
-    // shortcut: fire-and-forget, the `handoffResult` is not awaited; the closed record's
-    // `handoff` frame is the confirmation. Await it if a refusal ever needs showing.
-    public func closeHandoff(_ id: String, reason: String) {
-        guard supports(.chainHandoffs) else { return }
-        connection.send(["type": "closeHandoff", "handoffId": id, "closureReason": reason])
+    /// Awaits the `handoffResult`, so a refusal (`handoff-closed` when another surface
+    /// answered first, a store failure, an older core) throws instead of vanishing.
+    public func closeHandoff(_ id: String, reason: String) async throws {
+        try await chainWrite(["type": "closeHandoff", "handoffId": id, "closureReason": reason],
+                             needs: .chainHandoffs, unavailable: "handoff-unavailable")
     }
 
     /// One subscription per connection, sent once and again after a reconnect.
@@ -213,8 +218,10 @@ extension RustCoreClient {
             guard let handoff = Self.decodeJSON(ChainHandoff.self, body["handoff"]) else { return }
             publishHandoffs { $0.upsert(handoff) }
         default:
-            // `handoffResult` answers a write; `closeHandoff` does not wait for it.
-            return
+            // `handoffResult` answers a `closeHandoff`, correlated like a chain write.
+            guard let requestId = body["requestId"] as? String else { return }
+            let waiter = lock.withLock { chainWaiters.removeValue(forKey: requestId) }
+            waiter?.deliver(body)
         }
     }
 

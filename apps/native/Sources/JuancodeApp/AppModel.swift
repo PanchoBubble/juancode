@@ -5755,11 +5755,12 @@ final class AppModel {
     }
 
     /// Answer a question: the daemon closes it and queues the answer to the asker, once,
-    /// however many surfaces (this inbox, a Telegram reply) answer it.
-    func answerQuestion(_ question: ChainHandoff, _ answer: String) {
+    /// however many surfaces (this inbox, a Telegram reply) answer it. Throws the core's
+    /// refusal so the card can show it; the question stays open until the core confirms.
+    func answerQuestion(_ question: ChainHandoff, _ answer: String) async throws {
         let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        core.closeHandoff(question.id, reason: text)
+        try await core.closeHandoff(question.id, reason: text)
     }
 
     private func subscribeHandoffsMirror() {

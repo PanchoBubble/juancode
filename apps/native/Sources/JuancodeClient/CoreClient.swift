@@ -282,8 +282,9 @@ public protocol CoreClient: AnyObject, Sendable {
     func subscribeHandoffs(
         _ onBook: @escaping @Sendable (ChainHandoffBook) -> Void) -> @Sendable () -> Void
     /// Close a handoff (wire `closeHandoff`). For a question to the human the reason is
-    /// the answer, and the daemon queues it to the asker (juancode-8oa5.2).
-    func closeHandoff(_ id: String, reason: String)
+    /// the answer, and the daemon queues it to the asker (juancode-8oa5.2). Throws the
+    /// core's refusal, a `ChainError`.
+    func closeHandoff(_ id: String, reason: String) async throws
 
     // MARK: - The GitHub surface (capability: github)
 
@@ -441,8 +442,10 @@ public extension CoreClient {
         return {}
     }
 
-    /// Nothing to close on a core with no handoffs.
-    func closeHandoff(_ id: String, reason: String) {}
+    /// A core with no handoffs refuses, by name.
+    func closeHandoff(_ id: String, reason: String) async throws {
+        throw ChainError("handoff-unavailable")
+    }
 
     /// What a core with no `github` capability does: refuse, by name.
     ///

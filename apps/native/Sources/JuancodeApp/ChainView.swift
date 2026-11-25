@@ -615,6 +615,8 @@ private struct ChainQuestionCard: View {
     @Environment(AppModel.self) private var model
     let question: ChainHandoff
     @State private var draft = ""
+    @State private var sending = false
+    @State private var failure: String?
 
     var body: some View {
         let asker = question.source.sessionId.flatMap { id in model.sessions.first { $0.id == id }?.title }
@@ -628,26 +630,45 @@ private struct ChainQuestionCard: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
                 ForEach(question.questionOptions, id: \.self) { option in
-                    Button(option) { model.answerQuestion(question, option) }
+                    Button(option) { send(option) }
+                        .disabled(sending)
                         .help("Answer \u{201C}\(option)\u{201D}")
                 }
             }
             HStack(spacing: 6) {
                 TextField("Answer in your own words", text: $draft)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit(send)
+                    .onSubmit { send(draft) }
                     .accessibilityLabel("Answer")
-                Button("Send", action: send)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Send") { send(draft) }
+                    .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let failure {
+                Label(failure, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
     }
 
-    private func send() {
-        model.answerQuestion(question, draft)
-        draft = ""
+    /// The draft is kept until the core confirms: a refused answer stays typed, with the
+    /// reason beside it. A confirmed one closes the question and the card goes away.
+    private func send(_ answer: String) {
+        guard !sending else { return }
+        sending = true
+        failure = nil
+        Task {
+            defer { sending = false }
+            do {
+                try await model.answerQuestion(question, answer)
+                draft = ""
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
     }
 }
 
