@@ -24,7 +24,9 @@
 //!   position with its own id, editable again.
 //! - `Discarded` for [`SeedOutcome::Failed`], where bytes went out and the delivery
 //!   still did not finish. Re-queueing that is how this area has previously shipped a
-//!   duplicate paste, so it retires unsent with the reason instead.
+//!   duplicate paste, so it retires unsent with the reason instead, and an
+//!   `undelivered` advisory goes out on the session bus so a human hears about it
+//!   (the sidecar relays it to Telegram) instead of the text sitting unsent in silence.
 //!
 //! A claim outstanding is also the anti-duplicate-paste guard across retries:
 //! `claim_next` refuses a second claim while one is held, so a payload that landed in
@@ -36,7 +38,8 @@ use std::time::{Duration, Instant};
 
 use juancoded_cordis::services::queue::{ClaimRefused, Content, Delivery, QueueApi};
 use juancoded_core::model::SessionActivity;
-use juancoded_state::SessionsApi;
+use juancoded_state::stuck::head;
+use juancoded_state::{SessionsApi, StuckAlert, StuckKind};
 use tracing::{debug, warn};
 
 use crate::seed::{deliver_text, Precondition, SeedOutcome, SeedTiming};
@@ -132,11 +135,32 @@ pub async fn deliver_next(
         }
         SeedOutcome::Failed { reason } => {
             warn!(session, item = %claim.id, reason = %reason, "queue: typed and not submitted, discarding");
+            sessions.publish_stuck(session, undelivered_alert(&claim.content, &reason));
             Delivery::Discarded { reason }
         }
     };
     claim.settle(delivery.clone());
     Some(delivery)
+}
+
+/// The advisory for a message that was typed and never submitted. It names the
+/// message by its first line, because the text may still be sitting in the box and the
+/// human is the one who decides whether to press Enter, edit it, or clear it.
+fn undelivered_alert(content: &Content, reason: &str) -> StuckAlert {
+    let first = content
+        .as_text()
+        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()))
+        .unwrap_or("a queued keypress");
+    StuckAlert {
+        kind: StuckKind::Undelivered,
+        tool: None,
+        run: 0,
+        quiet_ms: 0,
+        advice: format!(
+            "A queued message was not submitted ({reason}). It may still be in the input box, and it will not be retried: \"{}\"",
+            head(first.trim(), 120)
+        ),
+    }
 }
 
 /// Run deliveries for every session that can take one, until the task is dropped.
@@ -320,6 +344,20 @@ mod tests {
             queue.snapshot("s").items.is_empty(),
             "it retires unsent rather than waiting to be typed again"
         );
+        let pastes = child
+            .written()
+            .iter()
+            .filter(|w| w.as_slice() != b"\r")
+            .count();
+        assert_eq!(pastes, 1, "pasted exactly once");
+        let alerts = child.stuck.lock().unwrap().clone();
+        assert_eq!(alerts.len(), 1, "surfaced exactly once: {alerts:?}");
+        assert_eq!(alerts[0].kind, StuckKind::Undelivered);
+        assert!(alerts[0].advice.contains("ship it"), "{}", alerts[0].advice);
+
+        // Nothing is left to take, so a later pass neither pastes nor surfaces again.
+        assert!(deliver_next(&sessions, &queue, "s", fast()).await.is_none());
+        assert_eq!(child.stuck.lock().unwrap().len(), 1);
     }
 
     /// The anti-duplicate-paste guard. A payload that landed in the box but has not

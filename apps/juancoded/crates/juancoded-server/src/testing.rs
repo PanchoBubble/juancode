@@ -54,6 +54,8 @@ pub struct FakeChild {
     pub running: AtomicBool,
     pub busy: AtomicBool,
     pub dormant: AtomicBool,
+    /// Every advisory published about this child, in order.
+    pub stuck: Mutex<Vec<juancoded_state::StuckAlert>>,
     events: broadcast::Sender<SessionEvent>,
 }
 
@@ -81,6 +83,7 @@ impl FakeChild {
             running: AtomicBool::new(true),
             busy: AtomicBool::new(false),
             dormant: AtomicBool::new(false),
+            stuck: Mutex::new(Vec::new()),
             events,
         })
     }
@@ -121,7 +124,9 @@ impl SessionsApi for FakeChild {
     /// classifies busy off `busy` below rather than off any transcript.
     fn on_transcript(&self, _id: &str, _records: &[juancoded_transcripts::TranscriptRecord]) {}
     fn fold_usage(&self, _id: &str, _records: &[juancoded_transcripts::TranscriptRecord]) {}
-    fn publish_stuck(&self, _id: &str, _alert: juancoded_state::StuckAlert) {}
+    fn publish_stuck(&self, _id: &str, alert: juancoded_state::StuckAlert) {
+        self.stuck.lock().unwrap().push(alert);
+    }
 
     fn set_meta(
         &self,

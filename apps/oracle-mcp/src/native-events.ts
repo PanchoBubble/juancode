@@ -66,7 +66,9 @@ export interface SessionActivityEvent {
  *  transcript seam, so under that backend this never arrives and nothing breaks. */
 export interface SessionStuckEvent {
   sessionId: string;
-  kind: "repeat" | "stall";
+  /** `undelivered`: a queued message (often a session notification) was typed and
+   *  never submitted, and the daemon retired it unsent rather than paste it again. */
+  kind: "repeat" | "stall" | "undelivered";
   /** The tool a repeat run is on; absent for a stall. */
   tool?: string;
   /** Consecutive identical calls; 0 for a stall. */
@@ -83,7 +85,7 @@ export interface SessionStuckEvent {
 export function parseStuckEvent(msg: Record<string, unknown>): SessionStuckEvent | null {
   if (msg.type !== "stuck") return null;
   if (typeof msg.sessionId !== "string" || !msg.sessionId) return null;
-  if (msg.kind !== "repeat" && msg.kind !== "stall") return null;
+  if (msg.kind !== "repeat" && msg.kind !== "stall" && msg.kind !== "undelivered") return null;
   if (typeof msg.advice !== "string" || !msg.advice) return null;
   const ev: SessionStuckEvent = {
     sessionId: msg.sessionId,

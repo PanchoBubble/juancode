@@ -1225,13 +1225,17 @@ export async function notifyStuckEvent(
     // Native app unreachable — advise with the id slice rather than staying silent.
   }
   const header = project ? `${title} — ${project}` : title;
-  const text = `🔁 ${header}\n${ev.advice}\n↩️ Reply to this message to steer it, or tap a key below.`;
+  const undelivered = ev.kind === "undelivered";
+  const text = `${undelivered ? "📭" : "🔁"} ${header}\n${ev.advice}\n↩️ Reply to this message to steer it, or tap a key below.`;
 
   for (const chatId of chats) {
     const key = `${chatId}:${ev.sessionId}`;
-    const last = state.lastStuck.get(key);
-    if (last !== undefined && now - last < STUCK_COOLDOWN_MS) continue;
-    state.lastStuck.set(key, now);
+    // A lost message is one event, not a condition that repeats, so no cooldown hides it.
+    if (!undelivered) {
+      const last = state.lastStuck.get(key);
+      if (last !== undefined && now - last < STUCK_COOLDOWN_MS) continue;
+      state.lastStuck.set(key, now);
+    }
     try {
       // The pad, because a session going in circles is the case ⌃C exists for — and
       // the advisory is read-only, so the human's tap is the only thing that acts.

@@ -26,6 +26,7 @@ import { markQueuedDispatch, type DispatchResultRecord } from "./dispatch-result
 import type { SessionSummary } from "./telegram-format.ts";
 import type { ChatReply } from "./oracle.ts";
 import { fakeChainDeps } from "./chains-fake.ts";
+import { parseStuckEvent } from "./native-events.ts";
 
 describe("readTelegramConfig", () => {
   it("returns null without a token", () => {
@@ -1227,6 +1228,32 @@ describe("notifyStuckEvent", () => {
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
     await notifyStuckEvent(ev, deps, state, STUCK_COOLDOWN_MS);
     expect((deps.send as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+  });
+
+  it("relays an undelivered queue message even inside a stall's cooldown", async () => {
+    const deps = makeDeps({ observers: observers([100]) });
+    const state = newBridgeState();
+    const stall = {
+      sessionId: "aaaa-1111",
+      kind: "stall" as const,
+      run: 0,
+      quietMs: 1,
+      advice: "w",
+    };
+    await notifyStuckEvent(stall, deps, state, 0);
+    const parsed = parseStuckEvent({
+      type: "stuck",
+      sessionId: "aaaa-1111",
+      kind: "undelivered",
+      run: 0,
+      quietMs: 0,
+      advice: 'A queued message was not submitted: "[Session notification 1]"',
+    });
+    expect(parsed?.kind).toBe("undelivered");
+    await notifyStuckEvent(parsed!, deps, state, 1);
+    const sends = (deps.send as ReturnType<typeof vi.fn>).mock.calls;
+    expect(sends).toHaveLength(2);
+    expect(sends[1]![1]).toContain("[Session notification 1]");
   });
 
   it("sends nothing when nobody is watching", async () => {

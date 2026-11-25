@@ -156,7 +156,7 @@ fn sorted(value: Value) -> Value {
 }
 
 /// Head of `text`, cut on a character boundary, marked when it cut.
-fn head(text: &str, max: usize) -> String {
+pub fn head(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -167,7 +167,7 @@ fn head(text: &str, max: usize) -> String {
     format!("{}…", &text[..end])
 }
 
-/// Which of the two failures an alert is about.
+/// Which failure an alert is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StuckKind {
@@ -175,6 +175,9 @@ pub enum StuckKind {
     Repeat,
     /// Claiming to work and producing nothing for [`StuckAlert::quiet_ms`].
     Stall,
+    /// A queued message was typed into the box and never submitted, so the queue
+    /// retired it unsent. Not a stuck agent: a stuck delivery to one.
+    Undelivered,
 }
 
 impl StuckKind {
@@ -182,6 +185,7 @@ impl StuckKind {
         match self {
             Self::Repeat => "repeat",
             Self::Stall => "stall",
+            Self::Undelivered => "undelivered",
         }
     }
 }
