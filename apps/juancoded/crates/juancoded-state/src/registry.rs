@@ -39,7 +39,10 @@ use juancoded_core::activity::{
     ActivityDetector, ScreenText, PROMPT_REGION_ROWS, SETTLE_MS, WATCHDOG_MS,
 };
 use juancoded_core::changes::{self, ChangeStat};
-use juancoded_core::model::{now_ms, ProviderId, SessionActivity, SessionMeta, SessionStatus};
+use juancoded_core::model::{
+    now_ms, PromptDelivery, PromptDeliveryState, ProviderId, SessionActivity, SessionMeta,
+    SessionStatus,
+};
 use juancoded_core::preset::PresetStore;
 use juancoded_core::provider::{resolve_provider_bin, IdSource, Providers, SpawnOptions};
 use juancoded_core::pty::{AdoptSpec, PtyEvent, PtyHandle, SpawnSpec};
@@ -664,6 +667,23 @@ impl SessionRegistry {
                     }
                 }
             });
+            // The task delivering it died with the old process, and whether it had
+            // typed anything is unknown: failed, never retried.
+            if meta
+                .prompt_delivery
+                .as_ref()
+                .is_some_and(|d| d.state == PromptDeliveryState::Pending)
+            {
+                meta.prompt_delivery = Some(PromptDelivery {
+                    state: PromptDeliveryState::Failed,
+                    verified: None,
+                    reason: Some(
+                        "the daemon restarted while the prompt was being delivered".into(),
+                    ),
+                    at: now_ms(),
+                });
+                let _ = self.inner.store.upsert(&meta);
+            }
             if handle.is_some() {
                 if meta.status != SessionStatus::Running {
                     meta.status = SessionStatus::Running;
@@ -1747,6 +1767,18 @@ impl SessionRegistry {
                 return false;
             }
             meta.dormant = true;
+            true
+        })
+    }
+
+    /// Record how a seeded create's initial prompt fared, persist it and broadcast the
+    /// row. `false` for a session this core does not hold.
+    pub fn set_prompt_delivery(&self, id: &str, delivery: PromptDelivery) -> bool {
+        let Some(live) = self.get(id) else {
+            return false;
+        };
+        self.edit_meta(id, &live, |meta| {
+            meta.prompt_delivery = Some(delivery);
             true
         })
     }

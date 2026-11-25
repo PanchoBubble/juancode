@@ -322,6 +322,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let status: String = row.get("status")?;
     let kind: String = row.get("kind")?;
     let usage: Option<String> = row.get("usage")?;
+    let prompt_delivery: Option<String> = row.get("prompt_delivery")?;
     Ok(SessionMeta {
         id: row.get("id")?,
         provider: ProviderId::parse(&provider).unwrap_or(ProviderId::Claude),
@@ -352,12 +353,14 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         preset: row.get("preset")?,
         pinned_model: row.get("pinned_model")?,
         parked_branch: row.get("parked_branch")?,
+        prompt_delivery: prompt_delivery.and_then(|p| serde_json::from_str(&p).ok()),
     })
 }
 
 const SESSION_COLUMNS: &str = "id, provider, cwd, title, status, exit_code, created_at, \
      updated_at, cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, \
-     title_is_manual, kind, parent_session_id, dispatch_id, preset, pinned_model, parked_branch";
+     title_is_manual, kind, parent_session_id, dispatch_id, preset, pinned_model, parked_branch, \
+     prompt_delivery";
 
 impl SessionStore for SqliteStore {
     fn attention(&self) -> Result<String> {
@@ -387,12 +390,16 @@ impl SessionStore for SqliteStore {
             .usage
             .as_ref()
             .and_then(|u| serde_json::to_string(u).ok());
+        let prompt_delivery = meta
+            .prompt_delivery
+            .as_ref()
+            .and_then(|p| serde_json::to_string(p).ok());
         self.conn().execute(
             "INSERT INTO sessions (id, provider, cwd, title, status, exit_code, created_at, \
              updated_at, cli_session_id, skip_permissions, worktree_path, usage, archived, \
              dormant, title_is_manual, kind, parent_session_id, dispatch_id, preset, pinned_model, \
-             parked_branch) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21) \
+             parked_branch, prompt_delivery) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) \
              ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, cwd=excluded.cwd, \
              title=excluded.title, status=excluded.status, exit_code=excluded.exit_code, \
              updated_at=excluded.updated_at, cli_session_id=excluded.cli_session_id, \
@@ -401,7 +408,7 @@ impl SessionStore for SqliteStore {
              title_is_manual=excluded.title_is_manual, kind=excluded.kind, \
              parent_session_id=excluded.parent_session_id, dispatch_id=excluded.dispatch_id, \
              preset=excluded.preset, pinned_model=excluded.pinned_model, \
-             parked_branch=excluded.parked_branch",
+             parked_branch=excluded.parked_branch, prompt_delivery=excluded.prompt_delivery",
             params![
                 meta.id,
                 meta.provider.as_str(),
@@ -424,6 +431,7 @@ impl SessionStore for SqliteStore {
                 meta.preset,
                 meta.pinned_model,
                 meta.parked_branch,
+                prompt_delivery,
             ],
         )?;
         Ok(())

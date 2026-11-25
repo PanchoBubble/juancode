@@ -350,6 +350,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE sessions ADD COLUMN preset TEXT;
     ALTER TABLE sessions ADD COLUMN pinned_model TEXT;
     "#,
+    // 18: how a seeded create's initial prompt fared, as JSON. NULL for every session
+    // created without one, and for every row that predates the column.
+    r#"
+    ALTER TABLE sessions ADD COLUMN prompt_delivery TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

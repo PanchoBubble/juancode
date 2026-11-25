@@ -27,7 +27,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use juancoded_core::model::SessionActivity;
+use juancoded_core::model::{PromptDelivery, PromptDeliveryState, SessionActivity};
 use juancoded_state::SessionsApi;
 use tracing::{debug, warn};
 
@@ -62,6 +62,23 @@ pub enum SeedOutcome {
 }
 
 impl SeedOutcome {
+    /// The row's record of this outcome.
+    pub fn delivery(&self) -> PromptDelivery {
+        let (state, verified) = match self {
+            Self::Submitted { verified_land } => {
+                (PromptDeliveryState::Submitted, Some(*verified_land))
+            }
+            Self::Refused { .. } => (PromptDeliveryState::Refused, None),
+            Self::Failed { .. } => (PromptDeliveryState::Failed, None),
+        };
+        PromptDelivery {
+            state,
+            verified,
+            reason: self.reason().map(str::to_string),
+            at: juancoded_core::model::now_ms(),
+        }
+    }
+
     pub fn is_submitted(&self) -> bool {
         matches!(self, Self::Submitted { .. })
     }

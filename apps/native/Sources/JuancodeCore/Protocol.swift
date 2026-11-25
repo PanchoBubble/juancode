@@ -155,6 +155,9 @@ public struct SessionMeta: Codable, Sendable, Equatable {
     /// The model this session was created pinned to (`create.model`). What the CLI is
     /// running now can differ after a `/model` switch; only its transcript knows that.
     public var pinnedModel: String?
+    /// How the create's initial prompt fared, for a session created with one. Set by
+    /// the daemon; this app only relays it.
+    public var promptDelivery: PromptDelivery?
 
     /// The directory an agent is actually working in: its juancode-owned worktree
     /// when isolated, otherwise its cwd. An "open editor" action roots the editor
@@ -180,7 +183,8 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         parentSessionId: String? = nil,
         dispatchId: String? = nil,
         preset: String? = nil,
-        pinnedModel: String? = nil
+        pinnedModel: String? = nil,
+        promptDelivery: PromptDelivery? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -201,6 +205,7 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         self.dispatchId = dispatchId
         self.preset = preset
         self.pinnedModel = pinnedModel
+        self.promptDelivery = promptDelivery
     }
 
     // Custom decode so payloads predating `archived` (older db rows / wire
@@ -226,7 +231,18 @@ public struct SessionMeta: Codable, Sendable, Equatable {
         dispatchId = try c.decodeIfPresent(String.self, forKey: .dispatchId)
         preset = try c.decodeIfPresent(String.self, forKey: .preset)
         pinnedModel = try c.decodeIfPresent(String.self, forKey: .pinnedModel)
+        promptDelivery = try c.decodeIfPresent(PromptDelivery.self, forKey: .promptDelivery)
     }
+}
+
+/// Where a seeded create's initial prompt stands, as the daemon records it on the row.
+/// `state` is `pending`, `submitted`, `refused` or `failed`; a string, not an enum, so
+/// a state this app does not know yet still relays.
+public struct PromptDelivery: Codable, Sendable, Equatable {
+    public var state: String
+    public var verified: Bool?
+    public var reason: String?
+    public var at: Int
 }
 
 extension SessionMeta {

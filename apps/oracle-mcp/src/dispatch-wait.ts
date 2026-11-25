@@ -4,9 +4,10 @@
 // sidecar, where checking costs nothing.
 //
 // "Worth looking at" means the dispatched agent stopped: it asked for input, settled
-// back to idle after working, its session exited, or the dispatch failed to start.
+// back to idle after working, its session exited, or the dispatch failed to start or
+// never got its prompt.
 
-import type { DispatchStatus } from "./dispatch-status.ts";
+import { promptUndelivered, type DispatchStatus } from "./dispatch-status.ts";
 import type { SessionActivityEvent } from "./native-events.ts";
 
 export type WaitOutcome = "failed" | "exited" | "waiting_input" | "idle" | "timeout";
@@ -57,6 +58,7 @@ export async function waitForDispatch(
     for (let first = true; ; first = false) {
       const status = await deps.getStatus(dispatchId);
       if (status.result && !status.result.ok) return { outcome: "failed", status };
+      if (promptUndelivered(status.session)) return { outcome: "failed", status };
       const session = status.session;
       if (session?.status === "exited") return { outcome: "exited", status };
       if (session) sessionId = session.id;

@@ -145,6 +145,16 @@ describe("parseSessionStates", () => {
     expect(parsed[1]!.dispatchId).toBeNull();
   });
 
+  it("carries the daemon's prompt delivery record", () => {
+    const [row] = parseSessionStates([
+      {
+        id: "s-1",
+        promptDelivery: { state: "submitted", verified: false, at: 5 },
+      },
+    ]);
+    expect(row!.promptDelivery).toEqual({ state: "submitted", verified: false, at: 5 });
+  });
+
   it("returns [] for a non-array payload", () => {
     expect(parseSessionStates({ sessions: [] })).toEqual([]);
     expect(parseSessionStates(null)).toEqual([]);

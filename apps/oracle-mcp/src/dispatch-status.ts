@@ -26,6 +26,38 @@ export interface DispatchSessionState {
   dispatchId: string | null;
   /** Epoch ms; absent when the native app did not report it. */
   createdAt?: number;
+  /** How the dispatch prompt fared, as the daemon recorded it on the row. Absent for a
+   *  session created without one (or by an older daemon). A running PTY alone says
+   *  nothing about whether the agent ever received its task. */
+  promptDelivery?: PromptDelivery;
+}
+
+export interface PromptDelivery {
+  /** "pending" | "submitted" | "refused" | "failed"; "failed" means bytes may already be
+   *  on screen, so the prompt must never be re-sent. */
+  state: string;
+  /** For "submitted": whether the text was seen in the input box before the Enter. */
+  verified?: boolean;
+  reason?: string;
+  at: number;
+}
+
+function parsePromptDelivery(raw: unknown): PromptDelivery | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.state !== "string") return undefined;
+  return {
+    state: r.state,
+    ...(typeof r.verified === "boolean" ? { verified: r.verified } : {}),
+    ...(typeof r.reason === "string" ? { reason: r.reason } : {}),
+    at: typeof r.at === "number" ? r.at : 0,
+  };
+}
+
+/** The prompt provably never became a turn: the agent will sit idle, not work. */
+export function promptUndelivered(session: DispatchSessionState | null): boolean {
+  const state = session?.promptDelivery?.state;
+  return state === "refused" || state === "failed";
 }
 
 export interface DispatchStatus {
@@ -58,6 +90,8 @@ export function parseSessionStates(raw: unknown): DispatchSessionState[] {
       dispatchId: typeof r.dispatchId === "string" ? r.dispatchId : null,
       ...(typeof r.createdAt === "number" ? { createdAt: r.createdAt } : {}),
     });
+    const promptDelivery = parsePromptDelivery(r.promptDelivery);
+    if (promptDelivery) out[out.length - 1]!.promptDelivery = promptDelivery;
   }
   return out;
 }

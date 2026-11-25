@@ -69,6 +69,15 @@ describe("waitForDispatch", () => {
     expect((await waitForDispatch("d-1", 10_000, h.deps)).outcome).toBe("failed");
   });
 
+  it("returns failed when the dispatch prompt was never submitted, while the pty runs on", async () => {
+    // Without this the child sits idle forever and the wait reads as a timeout.
+    const h = harness(status({}), "idle");
+    const p = waitForDispatch("d-1", 10_000, h.deps);
+    await tick();
+    h.set(status({ promptDelivery: { state: "failed", reason: "stayed in the box", at: T0 } }));
+    expect((await p).outcome).toBe("failed");
+  });
+
   it("returns exited once the session exits", async () => {
     const h = harness(status({}), "busy");
     const p = waitForDispatch("d-1", 10_000, h.deps);

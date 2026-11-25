@@ -156,6 +156,35 @@ pub struct SessionMeta {
     /// a client sees `cwd` at the repo root and no `worktree_path`, which is true.
     #[serde(skip)]
     pub parked_branch: Option<String>,
+    /// How the create's initial prompt fared, for a session created with one. On the
+    /// row, not only in an error frame to the asker: a dispatcher hangs up at `created`,
+    /// long before a CLI has booted far enough to be typed into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_delivery: Option<PromptDelivery>,
+}
+
+/// Where a seeded create's initial prompt stands. `Submitted` is the CLI taking it, not
+/// the task being done; `verified` says whether the text was seen in the box before the
+/// Enter. `Failed` means bytes may be on screen, so nothing may re-send it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptDeliveryState {
+    Pending,
+    Submitted,
+    Refused,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptDelivery {
+    pub state: PromptDeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// ms since epoch of the last state change.
+    pub at: i64,
 }
 
 impl SessionMeta {
@@ -189,6 +218,7 @@ impl SessionMeta {
             preset: None,
             pinned_model: None,
             parked_branch: None,
+            prompt_delivery: None,
         }
     }
 

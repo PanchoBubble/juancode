@@ -218,6 +218,7 @@ fn translate(row: &SwiftRow) -> SessionMeta {
         preset: None,
         pinned_model: None,
         parked_branch: None,
+        prompt_delivery: None,
     }
 }
 

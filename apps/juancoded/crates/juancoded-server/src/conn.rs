@@ -27,7 +27,7 @@ use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnap
 use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
 use juancoded_core::chain::ChainMemberKind;
 use juancoded_core::heavy::HeavyQueueSnapshot;
-use juancoded_core::model::ProviderId;
+use juancoded_core::model::{now_ms, PromptDelivery, PromptDeliveryState, ProviderId};
 use juancoded_persistence::review_store::ReviewStore;
 use juancoded_state::registry::{AdoptRequest, Attached, CreateRequest, SessionEvent, StateError};
 use juancoded_state::{ClientId, SessionReaper, SessionsApi};
@@ -826,8 +826,11 @@ fn push_attached(
     }
 }
 
-/// Run one seeded delivery in the background and report a failure to the client that
-/// asked for the create.
+/// Run one seeded delivery in the background, record its outcome on the session's row,
+/// and report a failure to the client that asked for the create.
+///
+/// The row is the durable record: a dispatcher closes its socket at `created`, so the
+/// error frame below usually has nobody left to read it.
 ///
 /// Background because the delivery spans the CLI's whole boot window: a create reply
 /// that waited for it would look like a hung daemon. The failure frame matters as
@@ -841,8 +844,9 @@ fn spawn_seed(
     oob: tokio::sync::mpsc::UnboundedSender<ServerMessage>,
 ) {
     tokio::spawn(async move {
-        let outcome = deliver_seed(sessions, &id, &text, SeedTiming::default()).await;
+        let outcome = deliver_seed(sessions.clone(), &id, &text, SeedTiming::default()).await;
         log_outcome(&id, &outcome);
+        sessions.set_prompt_delivery(&id, outcome.delivery());
         // Either failure is a prompt the agent never saw, and the client asked for a
         // create that was supposed to carry one. Which of the two it was matters to the
         // queue's claim boundary and to nobody here.
@@ -1101,10 +1105,27 @@ fn handle_client_message(
                         }
                     }
                     attached.insert(id.clone());
+                    // Pending on the row before `created` goes out, so no reader ever
+                    // sees a seeded session with no delivery record at all.
+                    let seeded = initial_input.filter(|t| !t.trim().is_empty());
+                    let meta = if seeded.is_some() {
+                        sessions.set_prompt_delivery(
+                            &id,
+                            PromptDelivery {
+                                state: PromptDeliveryState::Pending,
+                                verified: None,
+                                reason: None,
+                                at: now_ms(),
+                            },
+                        );
+                        sessions.meta(&id).unwrap_or(meta)
+                    } else {
+                        meta
+                    };
                     outbound.push(ServerMessage::Created {
                         session: meta.clone(),
                     });
-                    if let Some(text) = initial_input {
+                    if let Some(text) = seeded {
                         spawn_seed(sessions.clone(), id.clone(), text, fanout.oob.clone());
                     }
                     // Nothing to replay yet, and saying so is the client's baseline

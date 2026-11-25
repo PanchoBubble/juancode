@@ -16,7 +16,7 @@ use juancoded_persistence::{QueuedMessage, SearchHit, SessionStore};
 use juancoded_transcripts::TranscriptRecord;
 use juancoded_vt::{ScreenPeek, Snapshot};
 
-use juancoded_core::model::{SessionActivity, SessionMeta};
+use juancoded_core::model::{PromptDelivery, SessionActivity, SessionMeta};
 use tokio::sync::broadcast;
 
 use crate::grid::{ClientId, ResizeOutcome};
@@ -193,6 +193,12 @@ pub trait SessionsApi: Send + Sync {
     /// Called before `kill`, so the exited row carries the flag and a client can tell
     /// "slept, wake me on demand" from a crash.
     fn mark_dormant(&self, id: &str) -> bool;
+
+    /// Persist and broadcast how a seeded create's initial prompt fared. Defaulted to
+    /// a no-op for the map-backed stand-ins in tests; the registry overrides it.
+    fn set_prompt_delivery(&self, _id: &str, _delivery: PromptDelivery) -> bool {
+        false
+    }
 
     /// Put a session to sleep: flag the row dormant, then kill the CLI tree.
     ///
@@ -430,6 +436,10 @@ impl SessionsApi for SessionRegistry {
 
     fn mark_dormant(&self, id: &str) -> bool {
         SessionRegistry::mark_dormant(self, id)
+    }
+
+    fn set_prompt_delivery(&self, id: &str, delivery: PromptDelivery) -> bool {
+        SessionRegistry::set_prompt_delivery(self, id, delivery)
     }
 
     fn publish_stuck(&self, id: &str, alert: StuckAlert) {
