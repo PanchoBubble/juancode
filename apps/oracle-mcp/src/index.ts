@@ -89,7 +89,7 @@ import {
 } from "./notification-tools.ts";
 import { sessionNotifications } from "./session-notifications.ts";
 import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-results.ts";
-import { onSessionExit, onNativeConnection } from "./native-events.ts";
+import { onSessionExit, onSessionDeleted, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { askHuman } from "./chain-ask.ts";
 import { registerChainTools } from "./chain-tools.ts";
@@ -1391,6 +1391,9 @@ app.listen(port, host, () => {
   });
   onSessionExit((event) => {
     void notifications.publish(event).catch(report);
+  });
+  onSessionDeleted((id) => {
+    void notifications.forgetSession(id).catch(report);
   });
   const recover = async () => {
     // A dispatch can fail while the sidecar is down; replay durable outcomes.

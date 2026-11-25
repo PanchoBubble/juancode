@@ -71,6 +71,7 @@ interface NotificationDeps {
 export class SessionNotifications {
   private db: DatabaseSync;
   private work: Promise<unknown> = Promise.resolve();
+  private warnedCycles = new Set<string>();
   constructor(
     path: string,
     private deps: NotificationDeps,
@@ -192,6 +193,21 @@ export class SessionNotifications {
       return this.db.prepare("DELETE FROM subscriptions WHERE id = ?").run(id).changes > 0;
     });
   }
+  /** A deleted session can neither receive nor produce notifications: drop every
+   *  subscription it is part of and whatever was still undelivered for them. */
+  forgetSession(id: string): Promise<number> {
+    return this.serial(() => {
+      const where = `subscriber = ?1 OR (target_type = 'session' AND target_id = ?1)
+        OR (target_type = 'dispatch' AND source_session_id = ?1)`;
+      this.db
+        .prepare(
+          `DELETE FROM notifications WHERE delivered = 0 AND (subscriber = ?1
+           OR subscription_id IN (SELECT id FROM subscriptions WHERE ${where}))`,
+        )
+        .run(id);
+      return Number(this.db.prepare(`DELETE FROM subscriptions WHERE ${where}`).run(id).changes);
+    });
+  }
   private advance(row: SessionSubscription, event: NotificationEvent, actionable: boolean): void {
     // Dispatch alerts follow the dispatched turn. Keep explicit session watches
     // persistent, but retire dispatch watches at completion so later turns and
@@ -222,7 +238,14 @@ export class SessionNotifications {
           continue;
         // Also check late-bound dispatch targets: unknown targets must not turn
         // an otherwise acyclic chain into an agent feedback loop.
-        if (event.sessionId && this.cycle(row.subscriber, event.sessionId)) continue;
+        if (event.sessionId && this.cycle(row.subscriber, event.sessionId)) {
+          const key = `${row.subscriber}>${event.sessionId}`;
+          if (!this.warnedCycles.has(key)) {
+            this.warnedCycles.add(key);
+            console.warn(`session notifications: skipping ${key}, it would form a cycle`);
+          }
+          continue;
+        }
         if (event.sessionId)
           this.db
             .prepare("UPDATE subscriptions SET source_session_id = ? WHERE id = ?")

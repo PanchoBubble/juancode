@@ -371,6 +371,20 @@ describe("durable session notifications", () => {
     expect(await store.inbox("parent")).toEqual([]);
   });
 
+  it("forgetting a session drops its subscriptions both ways and their pending notifications", async () => {
+    const { store, deliver } = make();
+    await store.subscribe({ subscriber: "parent", targetType: "session", targetId: "child" });
+    await store.subscribe({ subscriber: "child", targetType: "session", targetId: "other" });
+    await store.subscribe({ subscriber: "child", targetType: "dispatch", targetId: "d1" });
+    await store.subscribe({ subscriber: "keep", targetType: "session", targetId: "other" });
+    deliver.mockRejectedValue(new Error("offline"));
+    await store.publish({ sessionId: "child", state: "idle", notify: true });
+    expect(await store.inbox("parent")).toHaveLength(1);
+    expect(await store.forgetSession("child")).toBe(3);
+    expect(await store.inbox("parent")).toEqual([]);
+    expect((await store.list()).map((r) => r.subscriber)).toEqual(["keep"]);
+  });
+
   it("retains failure reasons for queued dispatches that never get a session", async () => {
     const { store, output } = make();
     await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });

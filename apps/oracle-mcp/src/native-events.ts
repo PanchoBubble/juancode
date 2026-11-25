@@ -179,6 +179,14 @@ export function onSessionExit(listener: LifecycleListener): () => void {
     lifecycleListeners.delete(listener);
   };
 }
+const deletedListeners = new Set<(sessionId: string) => void>();
+/** Fires when the core forgets a session (`sessionDeleted`), not when it merely exits. */
+export function onSessionDeleted(listener: (sessionId: string) => void): () => void {
+  deletedListeners.add(listener);
+  return () => {
+    deletedListeners.delete(listener);
+  };
+}
 const connectionListeners = new Set<() => void>();
 export function onNativeConnection(listener: () => void): () => void {
   connectionListeners.add(listener);
@@ -1243,6 +1251,10 @@ function handleMessage(raw: string): void {
   }
   if (msg.type === "exit" && typeof msg.sessionId === "string") {
     emitExit(msg.sessionId);
+    return;
+  }
+  if (msg.type === "sessionDeleted" && typeof msg.sessionId === "string") {
+    for (const l of deletedListeners) l(msg.sessionId);
     return;
   }
   if (msg.type === "sessionMeta") {
