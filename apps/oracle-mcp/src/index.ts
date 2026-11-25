@@ -88,6 +88,7 @@ import {
   notificationFilterSchema,
 } from "./notification-tools.ts";
 import { sessionNotifications } from "./session-notifications.ts";
+import { startStallWatchdog } from "./stall-watchdog.ts";
 import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-results.ts";
 import { onSessionExit, onSessionDeleted, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
@@ -1395,6 +1396,11 @@ app.listen(port, host, () => {
   onSessionDeleted((id) => {
     void notifications.forgetSession(id).catch(report);
   });
+  startStallWatchdog(
+    () => notifications.list(),
+    (subscriptionId, sessionId, text) =>
+      notifications.raise(subscriptionId, sessionId, "stalled", text),
+  );
   const recover = async () => {
     // A dispatch can fail while the sidecar is down; replay durable outcomes.
     for (const result of await readDispatchResults()) {

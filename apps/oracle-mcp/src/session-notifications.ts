@@ -59,7 +59,8 @@ export interface SessionNotification {
   subscriber: string;
   sessionId: string;
   dispatchId?: string;
-  state: NotificationState;
+  /** "stalled" comes from stall-watchdog.ts, never from an activity event. */
+  state: NotificationState | "stalled";
   at: number;
   output: string;
   outputError?: string;
@@ -421,6 +422,36 @@ export class SessionNotifications {
     this.db.exec(`DELETE FROM notifications WHERE delivered = 1 AND rowid NOT IN
       (SELECT rowid FROM notifications WHERE delivered = 1 ORDER BY rowid DESC LIMIT 500)`);
     this.guard();
+  }
+  /** One outbox entry for a finding no activity event carries (stall-watchdog.ts),
+   *  delivered and escalated like any other; the subscription itself is untouched. */
+  raise(
+    subscriptionId: string,
+    sessionId: string,
+    state: "stalled",
+    output: string,
+  ): Promise<void> {
+    return this.serial(async () => {
+      const row = this.rows().find((r) => r.id === subscriptionId);
+      if (!row) return;
+      const item: SessionNotification = {
+        id: randomUUID(),
+        subscriptionId,
+        subscriber: row.subscriber,
+        sessionId,
+        ...(row.targetType === "dispatch" ? { dispatchId: row.targetId } : {}),
+        state,
+        at: Date.now(),
+        output,
+        delivered: false,
+      };
+      this.db
+        .prepare(
+          "INSERT INTO notifications (id, subscription_id, subscriber, body) VALUES (?, ?, ?, ?)",
+        )
+        .run(item.id, subscriptionId, row.subscriber, JSON.stringify(item));
+      await this.flushPending();
+    });
   }
   retry(): Promise<void> {
     return this.serial(() => this.flushPending());
