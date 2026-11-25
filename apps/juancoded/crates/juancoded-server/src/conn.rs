@@ -97,6 +97,9 @@ struct Fanout {
     /// belongs to by the whole of a CLI's boot window, and a delivery that failed has
     /// to say so on the wire rather than in a log nobody dispatching is reading.
     oob: tokio::sync::mpsc::UnboundedSender<ServerMessage>,
+    /// The budgets a seeded create's delivery runs under. A field so a test can shrink
+    /// the CLI's boot window; the real loop always uses the default.
+    seed_timing: SeedTiming,
 }
 
 /// Read current state, never a queued stale snapshot. Repeated ticks do not spam.
@@ -276,6 +279,7 @@ pub async fn handle(socket: WebSocket, handles: CoreHandles) {
         handoffs: false,
         carries: HashMap::new(),
         oob: oob_tx,
+        seed_timing: SeedTiming::default(),
     };
     // Tab-scoped, so it lives here rather than in the tree: the editor and shell
     // panes this client opened die with the socket that opened them.
@@ -842,9 +846,10 @@ fn spawn_seed(
     id: String,
     text: String,
     oob: tokio::sync::mpsc::UnboundedSender<ServerMessage>,
+    timing: SeedTiming,
 ) {
     tokio::spawn(async move {
-        let outcome = deliver_seed(sessions.clone(), &id, &text, SeedTiming::default()).await;
+        let outcome = deliver_seed(sessions.clone(), &id, &text, timing).await;
         log_outcome(&id, &outcome);
         sessions.set_prompt_delivery(&id, outcome.delivery());
         // Either failure is a prompt the agent never saw, and the client asked for a
@@ -1134,7 +1139,13 @@ fn handle_client_message(
                         session: meta.clone(),
                     });
                     if let Some(text) = seeded {
-                        spawn_seed(sessions.clone(), id.clone(), text, fanout.oob.clone());
+                        spawn_seed(
+                            sessions.clone(),
+                            id.clone(),
+                            text,
+                            fanout.oob.clone(),
+                            fanout.seed_timing,
+                        );
                     }
                     // Nothing to replay yet, and saying so is the client's baseline
                     // for everything that arrives after.
@@ -2331,6 +2342,7 @@ mod tests {
             // Nothing in these tests reads the side channel; the receiver is dropped
             // and a send on it is the no-op a departed client already gets.
             oob: tokio::sync::mpsc::unbounded_channel().0,
+            seed_timing: SeedTiming::default(),
         }
     }
 
@@ -4193,6 +4205,102 @@ mod tests {
             .chains
             .as_ref()
             .expect("the test tree mounts a chains book")
+    }
+
+    /// A seeded create from a client that hangs up at `created`, the way a dispatcher
+    /// does (juancode-zdrt). The returned frames are all that client ever reads; the
+    /// outcome has to be on the session row, which is what `/api/sessions` serves.
+    async fn seeded_create_then_hang_up(wire: &mut Wire) -> (String, Option<PromptDeliveryState>) {
+        let mut fanout = fanout();
+        fanout.seed_timing = SeedTiming {
+            ready_max_ms: 1_500,
+            ready_poll_ms: 50,
+            land_ms: 1_000,
+            land_deadline_ms: 3_000,
+            submit_settle_ms: 50,
+            submit_ms: 2_000,
+            poll_ms: 50,
+            ..SeedTiming::default()
+        };
+        let sent = wire.step(
+            ClientMessage::Create {
+                provider: "claude".into(),
+                cwd: "/tmp".into(),
+                cols: None,
+                rows: None,
+                initial_input: Some("a dispatched prompt".into()),
+                skip_permissions: None,
+                model: None,
+                preset: None,
+                isolate_worktree: None,
+                worktree_name: None,
+                reclaim_slot: None,
+                dispatch_id: None,
+                from_session_id: None,
+                role: None,
+            },
+            &mut fanout,
+        );
+        let created = sent
+            .iter()
+            .find_map(|f| match f {
+                ServerMessage::Created { session } => Some(session.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no created in {sent:?}"));
+        // The client is gone: its fanout, and the receiver behind `oob`, drop here.
+        drop(fanout);
+        (created.id, created.prompt_delivery.map(|d| d.state))
+    }
+
+    async fn settled_delivery(wire: &Wire, id: &str) -> juancoded_core::model::PromptDelivery {
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            // The listing is what `/api/sessions` returns, so this is the row a
+            // reader that never held the socket sees.
+            let row = wire
+                .sessions()
+                .sessions()
+                .into_iter()
+                .find(|m| m.id == id)
+                .and_then(|m| m.prompt_delivery);
+            match row {
+                Some(d) if d.state != PromptDeliveryState::Pending => return d,
+                _ if std::time::Instant::now() > until => {
+                    panic!("the delivery never left pending: {row:?}")
+                }
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_seeded_create_whose_client_hangs_up_at_created_still_records_submitted() {
+        let mut wire = Wire::new();
+        let (id, at_created) = seeded_create_then_hang_up(&mut wire).await;
+        assert_eq!(at_created, Some(PromptDeliveryState::Pending));
+
+        let done = settled_delivery(&wire, &id).await;
+        assert_eq!(done.state, PromptDeliveryState::Submitted, "{done:?}");
+        let _ = wire.sessions().kill(&id);
+    }
+
+    #[tokio::test]
+    async fn a_seeded_create_whose_client_hangs_up_and_whose_session_dies_is_not_left_pending() {
+        let mut wire = Wire::new();
+        let (id, at_created) = seeded_create_then_hang_up(&mut wire).await;
+        assert_eq!(at_created, Some(PromptDeliveryState::Pending));
+        wire.sessions().kill(&id).unwrap();
+
+        let done = settled_delivery(&wire, &id).await;
+        assert!(
+            matches!(
+                done.state,
+                PromptDeliveryState::Refused | PromptDeliveryState::Failed
+            ),
+            "{done:?}"
+        );
+        assert!(done.reason.is_some(), "a failure says why: {done:?}");
     }
 
     #[tokio::test]
