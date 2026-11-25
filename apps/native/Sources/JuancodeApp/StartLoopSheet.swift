@@ -81,8 +81,7 @@ struct StartLoopSheet: View {
                 }
                 AgentModelPicker(provider: provider, selection: $selectedModel).id(provider)
                 Stepper("Round cap: \(roundCap)", value: $roundCap, in: 1...10)
-                // shortcut: the budget rides in the prompt until juancode-8oa5.12's
-                // per-chain budget field lands; then send it as that field instead.
+                // The run-loop skill's budget B (juancode-8oa5.12) is set at loop start, in its prompt.
                 TextField("Token budget (optional)", text: $budget)
             }
             .formStyle(.grouped)
@@ -119,8 +118,7 @@ struct StartLoopSheet: View {
         if !trimmedGoal.isEmpty { lines.append(seed.epic == nil ? "Goal: \(trimmedGoal)" : trimmedGoal) }
         lines.append("Round cap: \(roundCap).")
         if let tokens = Int(budget.filter(\.isNumber)), tokens > 0 {
-            lines.append("Token budget for this chain: \(tokens) tokens. When the chain's total reaches it, "
-                + "stop dispatching and chain_ask me before going on.")
+            lines.append("Token budget: \(tokens) tokens.")
         }
         return lines.joined(separator: "\n\n")
     }
