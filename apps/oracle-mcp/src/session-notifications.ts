@@ -72,6 +72,9 @@ export interface SessionNotification {
   escalatedTo?: "human";
   /** Seen in the subscriber's transcript after it exited: the queue typed it. */
   typed?: boolean;
+  /** The daemon typed this into the subscriber's box and never submitted it
+   *  (stuck kind=undelivered): the next delivery skips the subscriber. */
+  unsubmitted?: boolean;
 }
 export interface SessionLiveness {
   running: boolean;
@@ -394,6 +397,30 @@ export class SessionNotifications {
         .run(JSON.stringify(item), item.delivered ? 1 : 0, item.id);
     }
   }
+  /** The daemon retired a queued message typed and never submitted (a stuck
+   *  `undelivered` advisory) while the subscriber kept running. Its first line is
+   *  `[Session notification <id>]`, so a notification is found by that id and put
+   *  back to pending, addressed past the subscriber: its box may still hold the
+   *  text, and pasting it again there is how a duplicate happens. */
+  undelivered(subscriber: string, advice: string): Promise<void> {
+    const id = /\[Session notification ([0-9a-f-]{36})\]/.exec(advice)?.[1];
+    if (!id) return Promise.resolve();
+    return this.serial(async () => {
+      const row = this.db
+        .prepare("SELECT body FROM notifications WHERE id = ? AND subscriber = ? AND delivered = 1")
+        .get(id, subscriber);
+      if (!row) return;
+      const item = JSON.parse(String(row.body)) as SessionNotification;
+      if (item.escalatedTo) return;
+      item.delivered = false;
+      item.unsubmitted = true;
+      item.deliveryError = `Typed into ${subscriber}'s input box and never submitted`;
+      this.db
+        .prepare("UPDATE notifications SET body = ?, delivered = 0 WHERE id = ?")
+        .run(JSON.stringify(item), id);
+      await this.flushPending();
+    });
+  }
   private async flushPending(): Promise<void> {
     const rows = this.db
       .prepare("SELECT * FROM notifications WHERE delivered = 0 ORDER BY rowid")
@@ -409,7 +436,7 @@ export class SessionNotifications {
       // The daemon queues for an exited or sleeping session and then drops the queue,
       // so the result goes up the dispatch chain to the nearest running ancestor,
       // else to the human. The row is readdressed in place: one row, one delivery.
-      if (sessions && !sessions.get(item.subscriber)?.running) {
+      if (sessions && (item.unsubmitted || !sessions.get(item.subscriber)?.running)) {
         const seen = new Set([item.subscriber]);
         let heir = sessions.get(item.subscriber)?.parent;
         while (heir && !seen.has(heir) && !sessions.get(heir)?.running) {
@@ -419,6 +446,7 @@ export class SessionNotifications {
         if (heir && sessions.get(heir)?.running) {
           item.escalatedFrom ??= item.subscriber;
           item.subscriber = heir;
+          delete item.unsubmitted;
           this.db
             .prepare("UPDATE notifications SET subscriber = ?, body = ? WHERE id = ?")
             .run(heir, JSON.stringify(item), item.id);
@@ -428,6 +456,7 @@ export class SessionNotifications {
             await this.deps.toHuman!(item, humanText(item));
             item.delivered = true;
             item.escalatedTo = "human";
+            delete item.unsubmitted;
             delete item.deliveryError;
           } catch (e) {
             item.deliveryError = String(e);

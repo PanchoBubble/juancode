@@ -446,7 +446,11 @@ describe("durable session notifications", () => {
         parent: { running: false },
         child: { running: true, parent: "parent" },
       });
-      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
       await store.publish(event("busy"));
       await store.publish(event("exited"));
       await store.publish({ sessionId: "other", state: "idle", notify: true });
@@ -462,7 +466,11 @@ describe("durable session notifications", () => {
     it("retries a failed human handoff and still records it only once", async () => {
       const { store, toHuman } = escalating({ parent: { running: false } });
       toHuman.mockRejectedValueOnce(new Error("handoff-timeout"));
-      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
       await store.publish(event("exited"));
       expect((await store.inbox("parent"))[0]).toMatchObject({ delivered: false });
       await store.retry();
@@ -478,7 +486,11 @@ describe("durable session notifications", () => {
         parent: { running: false, parent: "asleep" },
         asleep: { running: false, parent: "grandparent" },
       });
-      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
       await store.publish(event("exited"));
       await store.retry();
       expect(toHuman).not.toHaveBeenCalled();
@@ -512,7 +524,11 @@ describe("durable session notifications", () => {
         protect,
       });
       stores.push(store);
-      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
       await store.publish(event("busy"));
       reap();
       await store.publish(event("exited"));
@@ -534,7 +550,11 @@ describe("durable session notifications", () => {
         protect,
       });
       stores.push(store);
-      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
       expect(protect).toHaveBeenLastCalledWith(["parent"]);
       await store.publish(event("exited"));
       expect(toHuman).toHaveBeenCalledTimes(1);
@@ -564,7 +584,11 @@ describe("durable session notifications", () => {
 
       it("escalates the untyped result exactly once when the parent exits", async () => {
         const { store, live, deliver, toHuman, received } = accepting([]);
-        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.subscribe({
+          subscriber: "parent",
+          targetType: "dispatch",
+          targetId: "dispatch-1",
+        });
         await store.publish(event("exited"));
         expect(deliver).toHaveBeenCalledTimes(1);
         live.set("parent", { running: false });
@@ -582,7 +606,11 @@ describe("durable session notifications", () => {
 
       it("leaves a result the parent did type alone, and asks only once", async () => {
         const { store, live, deliver, toHuman, received } = accepting([]);
-        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.subscribe({
+          subscriber: "parent",
+          targetType: "dispatch",
+          targetId: "dispatch-1",
+        });
         await store.publish(event("exited"));
         const typed = deliver.mock.calls[0]![1];
         received.mockResolvedValue(`some prompt\n${typed}`);
@@ -596,7 +624,11 @@ describe("durable session notifications", () => {
 
       it("hands an untyped result to a running ancestor instead", async () => {
         const { store, live, deliver, toHuman } = accepting([]);
-        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.subscribe({
+          subscriber: "parent",
+          targetType: "dispatch",
+          targetId: "dispatch-1",
+        });
         await store.publish(event("exited"));
         live.set("parent", { running: false, parent: "grandparent" });
         live.set("grandparent", { running: true });
@@ -610,7 +642,11 @@ describe("durable session notifications", () => {
 
       it("escalates nothing, and checks again later, while the transcript cannot be read", async () => {
         const { store, live, toHuman, received } = accepting([]);
-        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.subscribe({
+          subscriber: "parent",
+          targetType: "dispatch",
+          targetId: "dispatch-1",
+        });
         await store.publish(event("exited"));
         live.set("parent", { running: false });
         received.mockRejectedValueOnce(new Error("app down"));
@@ -621,10 +657,69 @@ describe("durable session notifications", () => {
       });
     });
 
+    // juancode-dw1r: the daemon retired the typed-and-unsubmitted message while the
+    // parent kept running, so nothing about the parent's state changes.
+    describe("typed into the parent's box and never submitted", () => {
+      async function undelivered() {
+        const live = new Map<string, { running: boolean; parent?: string }>([
+          ["parent", { running: true, parent: "grandparent" }],
+          ["grandparent", { running: true }],
+        ]);
+        const deliver = vi.fn(async (_id: string, _text: string) => {});
+        const toHuman = vi.fn(async (_item: unknown, _text: string) => {});
+        const store = new SessionNotifications(":memory:", {
+          output: async () => "The final answer",
+          deliver,
+          sessions: async () => live,
+          toHuman,
+        });
+        stores.push(store);
+        await store.subscribe({
+          subscriber: "parent",
+          targetType: "dispatch",
+          targetId: "dispatch-1",
+        });
+        await store.publish(event("exited"));
+        const text = deliver.mock.calls[0]![1];
+        const advice = `A queued message was not submitted (x): "${text.split("\n")[0]}"`;
+        return { store, live, deliver, toHuman, advice };
+      }
+
+      it("hands the result to a running ancestor, not back into the same box", async () => {
+        const { store, deliver, advice } = await undelivered();
+        await store.undelivered("parent", advice);
+        await store.undelivered("parent", advice);
+        expect(deliver.mock.calls.map((c) => c[0])).toEqual(["parent", "grandparent"]);
+        expect(await store.inbox("grandparent")).toMatchObject([
+          { escalatedFrom: "parent", delivered: true },
+        ]);
+      });
+
+      it("gives it to the human when nobody above is running", async () => {
+        const { store, live, toHuman, advice } = await undelivered();
+        live.set("grandparent", { running: false });
+        await store.undelivered("parent", advice);
+        expect(toHuman).toHaveBeenCalledTimes(1);
+        expect(toHuman.mock.calls[0]![1]).toContain("The final answer");
+      });
+
+      it("ignores an advisory that names no notification of that session", async () => {
+        const { store, deliver, toHuman, advice } = await undelivered();
+        await store.undelivered("parent", 'A queued message was not submitted: "hello"');
+        await store.undelivered("other", advice);
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(toHuman).not.toHaveBeenCalled();
+      });
+    });
+
     it("escalates nothing while the core cannot list sessions", async () => {
       const { store, deliver, toHuman, sessions } = escalating({});
       sessions.mockRejectedValue(new Error("app down"));
-      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.subscribe({
+        subscriber: "parent",
+        targetType: "dispatch",
+        targetId: "dispatch-1",
+      });
       await store.publish(event("exited"));
       expect(toHuman).not.toHaveBeenCalled();
       expect(deliver).toHaveBeenCalledTimes(1);

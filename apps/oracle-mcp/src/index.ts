@@ -90,7 +90,12 @@ import {
 import { sessionNotifications } from "./session-notifications.ts";
 import { startStallWatchdog } from "./stall-watchdog.ts";
 import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-results.ts";
-import { onSessionExit, onSessionDeleted, onNativeConnection } from "./native-events.ts";
+import {
+  onSessionExit,
+  onSessionDeleted,
+  onSessionStuck,
+  onNativeConnection,
+} from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { askHuman } from "./chain-ask.ts";
 import { isRole, ROLES } from "./roles.ts";
@@ -1417,6 +1422,10 @@ app.listen(port, host, () => {
   });
   onSessionExit((event) => {
     void notifications.publish(event).catch(report);
+  });
+  onSessionStuck((ev) => {
+    if (ev.kind === "undelivered")
+      void notifications.undelivered(ev.sessionId, ev.advice).catch(report);
   });
   onSessionDeleted((id) => {
     void notifications.forgetSession(id).catch(report);
