@@ -425,4 +425,78 @@ describe("durable session notifications", () => {
     expect((await store.inbox("parent"))[0]!.output).toBe("Invalid cwd");
     expect(output).not.toHaveBeenCalled();
   });
+
+  describe("a subscriber that is no longer running (juancode-8oa5.4)", () => {
+    function escalating(live: Record<string, { running: boolean; parent?: string }>) {
+      const deliver = vi.fn(async (_id: string, _text: string) => {});
+      const toHuman = vi.fn(async (_item: unknown, _text: string) => {});
+      const sessions = vi.fn(async () => new Map(Object.entries(live)));
+      const store = new SessionNotifications(":memory:", {
+        output: async () => "The final answer",
+        deliver,
+        sessions,
+        toHuman,
+      });
+      stores.push(store);
+      return { store, deliver, toHuman, sessions };
+    }
+
+    it("hands the child's result to the human exactly once when the parent exited first", async () => {
+      const { store, deliver, toHuman } = escalating({
+        parent: { running: false },
+        child: { running: true, parent: "parent" },
+      });
+      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.publish(event("busy"));
+      await store.publish(event("exited"));
+      await store.publish({ sessionId: "other", state: "idle", notify: true });
+      await store.retry();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(toHuman).toHaveBeenCalledTimes(1);
+      expect(toHuman.mock.calls[0]![1]).toContain("The final answer");
+      expect(await store.inbox("parent")).toMatchObject([
+        { state: "exited", delivered: true, escalatedTo: "human" },
+      ]);
+    });
+
+    it("retries a failed human handoff and still records it only once", async () => {
+      const { store, toHuman } = escalating({ parent: { running: false } });
+      toHuman.mockRejectedValueOnce(new Error("handoff-timeout"));
+      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.publish(event("exited"));
+      expect((await store.inbox("parent"))[0]).toMatchObject({ delivered: false });
+      await store.retry();
+      await store.retry();
+      expect(toHuman).toHaveBeenCalledTimes(2);
+      expect(toHuman.mock.calls[0]![1]).toBe(toHuman.mock.calls[1]![1]);
+      expect((await store.inbox("parent"))[0]).toMatchObject({ delivered: true });
+    });
+
+    it("delivers to the nearest running ancestor instead, once, and not to the human", async () => {
+      const { store, deliver, toHuman } = escalating({
+        grandparent: { running: true },
+        parent: { running: false, parent: "asleep" },
+        asleep: { running: false, parent: "grandparent" },
+      });
+      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.publish(event("exited"));
+      await store.retry();
+      expect(toHuman).not.toHaveBeenCalled();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver.mock.calls[0]![0]).toBe("grandparent");
+      expect(await store.inbox("parent")).toEqual([]);
+      expect(await store.inbox("grandparent")).toMatchObject([
+        { escalatedFrom: "parent", delivered: true },
+      ]);
+    });
+
+    it("escalates nothing while the core cannot list sessions", async () => {
+      const { store, deliver, toHuman, sessions } = escalating({});
+      sessions.mockRejectedValue(new Error("app down"));
+      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.publish(event("exited"));
+      expect(toHuman).not.toHaveBeenCalled();
+      expect(deliver).toHaveBeenCalledTimes(1);
+    });
+  });
 });

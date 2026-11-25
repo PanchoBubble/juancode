@@ -5,10 +5,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { oracleDir } from "./oracle.ts";
+import { listSessions, oracleDir } from "./oracle.ts";
 import { fetchMessages, type SessionMessage } from "./session-reads.ts";
 import { deliverSessionNotification } from "./notification-delivery.ts";
 import { extractResultBlock } from "./result-block.ts";
+import { chainForSession } from "./native-events.ts";
+import { notifyOracleText } from "./telegram.ts";
+import { defaultAskDeps, handToHuman } from "./chain-ask.ts";
 
 export const NOTIFICATION_STATES = ["busy", "idle", "waiting_input", "exited", "failed"] as const;
 export type NotificationState = (typeof NOTIFICATION_STATES)[number];
@@ -62,10 +65,22 @@ export interface SessionNotification {
   outputError?: string;
   delivered: boolean;
   deliveryError?: string;
+  /** The subscriber that was no longer running when this was delivered up its chain. */
+  escalatedFrom?: string;
+  /** Set when nobody up the chain was running and the human got it as a handoff. */
+  escalatedTo?: "human";
+}
+export interface SessionLiveness {
+  running: boolean;
+  parent?: string;
 }
 interface NotificationDeps {
   output: (id: string) => Promise<string>;
   deliver: (subscriber: string, text: string) => Promise<void>;
+  /** Every known session; null when the core cannot say, which escalates nothing. */
+  sessions?: () => Promise<Map<string, SessionLiveness> | null>;
+  /** Give the human a result nobody running can receive. Throws to retry later. */
+  toHuman?: (item: SessionNotification, text: string) => Promise<void>;
 }
 
 export class SessionNotifications {
@@ -319,10 +334,47 @@ export class SessionNotifications {
     const rows = this.db
       .prepare("SELECT * FROM notifications WHERE delivered = 0 ORDER BY rowid")
       .all();
+    const sessions =
+      rows.length && this.deps.sessions && this.deps.toHuman
+        ? await this.deps.sessions().catch(() => null)
+        : null;
     const blocked = new Set<string>();
     for (const row of rows) {
       const item = JSON.parse(String(row.body)) as SessionNotification;
       if (blocked.has(item.subscriber)) continue;
+      // The daemon queues for an exited or sleeping session and then drops the queue,
+      // so the result goes up the dispatch chain to the nearest running ancestor,
+      // else to the human. The row is readdressed in place: one row, one delivery.
+      if (sessions && !sessions.get(item.subscriber)?.running) {
+        const seen = new Set([item.subscriber]);
+        let heir = sessions.get(item.subscriber)?.parent;
+        while (heir && !seen.has(heir) && !sessions.get(heir)?.running) {
+          seen.add(heir);
+          heir = sessions.get(heir)?.parent;
+        }
+        if (heir && sessions.get(heir)?.running) {
+          item.escalatedFrom ??= item.subscriber;
+          item.subscriber = heir;
+          this.db
+            .prepare("UPDATE notifications SET subscriber = ?, body = ? WHERE id = ?")
+            .run(heir, JSON.stringify(item), item.id);
+          if (blocked.has(heir)) continue;
+        } else {
+          try {
+            await this.deps.toHuman!(item, humanText(item));
+            item.delivered = true;
+            item.escalatedTo = "human";
+            delete item.deliveryError;
+          } catch (e) {
+            item.deliveryError = String(e);
+            blocked.add(item.subscriber);
+          }
+          this.db
+            .prepare("UPDATE notifications SET body = ?, delivered = ? WHERE id = ?")
+            .run(JSON.stringify(item), item.delivered ? 1 : 0, item.id);
+          continue;
+        }
+      }
       try {
         const payload = { ...item };
         delete payload.deliveryError;
@@ -361,6 +413,14 @@ export class SessionNotifications {
   }
 }
 
+/** Deterministic per notification: the handoff id is the notification id, and the
+ *  daemon treats a repeat with the same summary as the same handoff. */
+function humanText(item: SessionNotification): string {
+  return `Result of session ${item.sessionId} (${item.state}) for ${
+    item.escalatedFrom ?? item.subscriber
+  }, which is no longer running (exited or asleep), so no agent received it:\n${item.output}`;
+}
+
 function resultFinishes(output: string): boolean {
   const block = extractResultBlock(output);
   return block !== null && !/^status:\s*question\b/im.test(block);
@@ -374,6 +434,31 @@ export function sessionNotifications(): SessionNotifications {
   const instance = new SessionNotifications(join(oracleDir(), "session-notifications.sqlite"), {
     output: async (id) => latestAssistantResponse((await fetchMessages(id, 12)).messages),
     deliver: deliverSessionNotification,
+    sessions: async () => {
+      const raw = (await listSessions()) as unknown;
+      const list = Array.isArray(raw) ? raw : (raw as { sessions?: unknown })?.sessions;
+      if (!Array.isArray(list)) return null;
+      const out = new Map<string, SessionLiveness>();
+      for (const r of list as Record<string, unknown>[])
+        if (typeof r?.id === "string")
+          out.set(r.id, {
+            running: r.status === "running",
+            ...(typeof r.parentSessionId === "string" ? { parent: r.parentSessionId } : {}),
+          });
+      return out;
+    },
+    toHuman: async (item, text) => {
+      // The child is the handoff's source; its chain, else the subscriber's.
+      const chainSlugOf = (id: string) =>
+        chainForSession(id)?.slug ??
+        chainForSession(item.escalatedFrom ?? item.subscriber)?.slug ??
+        null;
+      if (chainSlugOf(item.sessionId)) {
+        await handToHuman(item.sessionId, text, item.id, { ...defaultAskDeps, chainSlugOf });
+      } else if (!(await notifyOracleText(item.sessionId, text)).chatIds.length) {
+        throw new Error("No chain and no Telegram chat to escalate to");
+      }
+    },
   });
   instances.set(path, instance);
   return instance;

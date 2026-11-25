@@ -63,7 +63,23 @@ export async function askHuman(input: AskInput, deps: AskDeps = defaultAskDeps):
   if (!asker) {
     throw new Error("Supply your session id; the caller could not be identified unambiguously.");
   }
-  const chainSlug = deps.chainSlugOf(asker);
+  const text = askText(input);
+  const { id, chainSlug, sent } = await handToHuman(asker, text, deps.newId(), deps);
+  return `Question recorded for the human (handoff ${id}, chain ${chainSlug}); ${
+    sent ? `pinged ${sent} Telegram chat${sent === 1 ? "" : "s"}` : "no Telegram chat was pinged"
+  }. Stop and wait: the answer arrives as your next input.`;
+}
+
+/** The human-targeted handoff from `source`'s chain plus one best-effort ping. A
+ *  repeated `id` with the same summary is the same handoff to the daemon, so a retry
+ *  after a crash records nothing twice. Throws, having changed nothing, without a chain. */
+export async function handToHuman(
+  source: string,
+  text: string,
+  id: string,
+  deps: Pick<AskDeps, "chainSlugOf" | "supported" | "createHandoff" | "notify"> = defaultAskDeps,
+): Promise<{ id: string; chainSlug: string; sent: number }> {
+  const chainSlug = deps.chainSlugOf(source);
   if (!chainSlug) {
     throw new Error(
       "This session is not in a chain, so there is nobody to route the question to. Ask in your normal reply instead.",
@@ -72,21 +88,17 @@ export async function askHuman(input: AskInput, deps: AskDeps = defaultAskDeps):
   if (!deps.supported()) {
     throw new Error("This core does not record handoffs (no chainHandoffs capability).");
   }
-  const text = askText(input);
-  const id = deps.newId();
   const made = await deps.createHandoff({
     id,
     chainSlug,
-    source: { kind: "session", sessionId: asker },
+    source: { kind: "session", sessionId: source },
     target: { kind: "human" },
     summary: text,
   });
   if (!made.ok) throw new Error(`Could not record the question (${made.error ?? "unknown"}).`);
-  const sent = await deps.notify(asker, text).then(
+  const sent = await deps.notify(source, text).then(
     (r) => r.chatIds.length,
     () => 0,
   );
-  return `Question recorded for the human (handoff ${id}, chain ${chainSlug}); ${
-    sent ? `pinged ${sent} Telegram chat${sent === 1 ? "" : "s"}` : "no Telegram chat was pinged"
-  }. Stop and wait: the answer arrives as your next input.`;
+  return { id, chainSlug, sent };
 }
