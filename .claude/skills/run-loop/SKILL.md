@@ -72,7 +72,8 @@ checkout (dispatch-agents step 2), `SCRATCH` = your scratchpad. Keep the loop st
      (`git fetch -q && git branch -r --contains <sha>`), retire the implementer, then
      dispatch a tester: `role:"tester"`, `ticket:"<id>"`, `worktree:true`, prompt
      "Verify bd ticket <id> against its acceptance criteria; the implementation is
-     <sha> on main." (tester row of the model table).
+     <sha> on main. Close the ticket on a pass." (tester row of the model table). Say
+     the close explicitly: a prompt that only says "verify" reads as "change nothing".
    - `status: question` / `blocked` → it already raised `chain_ask` or says why it
      stopped. Leave it running (it is waiting for the answer); note it and move on.
    - No RESULT → now read its screen
@@ -80,8 +81,8 @@ checkout (dispatch-agents step 2), `SCRATCH` = your scratchpad. Keep the loop st
      as a failed round.
 
 5. **On a tester RESULT.**
-   - `status: done` (pass) → the tester closed the ticket; confirm with `bd show`,
-     retire the tester, update the summary, back to step 2 (its dependents may be
+   - `status: done` (pass) → the tester should have closed the ticket; confirm with
+     `bd show` and close it yourself if it did not, retire the tester, update the summary, back to step 2 (its dependents may be
      ready now).
    - `status: blocked` (fail) → retire the tester, increment the ticket's round. Below
      the cap: step 3 with the evidence. At the cap: step 6.
