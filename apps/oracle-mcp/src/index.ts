@@ -91,6 +91,7 @@ import { sessionNotifications } from "./session-notifications.ts";
 import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-results.ts";
 import { onSessionExit, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
+import { askHuman } from "./chain-ask.ts";
 import { registerChainTools } from "./chain-tools.ts";
 import { HandoffRefused, handOffSession, handoffSummary } from "./session-handoff.ts";
 import { fail, ok, tool } from "./tool-result.ts";
@@ -167,9 +168,7 @@ function buildServer(): McpServer {
         provider: z
           .enum(["claude", "codex", "opencode", "kimi"])
           .optional()
-          .describe(
-            "Optional provider pin; omitted, routing may choose Claude or Codex by task",
-          ),
+          .describe("Optional provider pin; omitted, routing may choose Claude or Codex by task"),
         model: z
           .string()
           .trim()
@@ -336,6 +335,29 @@ function buildServer(): McpServer {
         return fail(e instanceof Error ? e.message : String(e));
       }
     },
+  );
+
+  server.registerTool(
+    "chain_ask",
+    {
+      title: "Ask the human a question",
+      description:
+        "Ask the human a decision question from inside a chain: records a pending handoff to the human in your chain and pings their phone (Telegram) once. Use it when you are blocked on a choice only they can make, then stop and wait; their answer arrives as your next input. Refuses, changing nothing, when your session is not in a chain.",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Your own juancode or CLI session id; inferred only for an unambiguous busy Oracle",
+          ),
+        question: z.string().trim().min(1),
+        options: z.array(z.string().trim().min(1)).min(2).max(4).describe("2-4 distinct choices"),
+        recommended: z.string().trim().min(1).describe("The default you would pick"),
+        blocked: z.string().trim().min(1).describe("What stays blocked until they answer"),
+      },
+    },
+    tool(async (args) => ok(await askHuman(args))),
   );
 
   server.registerTool(
@@ -733,6 +755,37 @@ app.post("/api/sessions/delete", async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (e) {
     sendErr(res, e);
+  }
+});
+
+// chain_ask for HTTP callers (juancode-8oa5.1): same function as the MCP tool. A
+// refusal (no chain, no such session) is a 409 whose `error` is the sentence to show.
+app.post("/api/chain/ask", async (req: Request, res: Response) => {
+  const b = req.body ?? {};
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const options = Array.isArray(b.options) ? b.options.map(str) : [];
+  if (
+    !str(b.question) ||
+    !str(b.recommended) ||
+    !str(b.blocked) ||
+    options.length < 2 ||
+    options.length > 4 ||
+    options.some((o: string) => !o)
+  ) {
+    res.status(400).send("question, 2-4 options, recommended and blocked are required");
+    return;
+  }
+  try {
+    const message = await askHuman({
+      sessionId: str(b.sessionId) || undefined,
+      question: str(b.question),
+      options,
+      recommended: str(b.recommended),
+      blocked: str(b.blocked),
+    });
+    res.json({ ok: true, message });
+  } catch (e) {
+    res.status(409).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }
 });
 
