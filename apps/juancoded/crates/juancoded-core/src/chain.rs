@@ -160,6 +160,11 @@ pub struct ChainMember {
     /// On the wire only while `true`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+    /// What this member does in the chain (`orchestrator`, `planner`, `implementer`,
+    /// `tester`, ...), set by the dispatch that created it. A label only: an unroled
+    /// chain is a plain group, and the daemon attaches no behaviour to the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 impl ChainMember {
@@ -350,6 +355,7 @@ mod tests {
             url: None,
             added_at: 7,
             done: false,
+            role: None,
         };
         let v = serde_json::to_value(&member).unwrap();
         assert_eq!(
@@ -360,6 +366,7 @@ mod tests {
         );
         let done = ChainMember {
             done: true,
+            role: None,
             ..member
         };
         assert_eq!(serde_json::to_value(&done).unwrap()["done"], true);
@@ -374,6 +381,7 @@ mod tests {
             url: None,
             added_at: 1,
             done: false,
+            role: None,
         };
         let mut chain = Chain {
             id: "test-id".into(),

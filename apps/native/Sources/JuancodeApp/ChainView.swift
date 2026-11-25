@@ -338,6 +338,11 @@ struct ChainTabLabel {
             detail = nil
             help = member.title ?? member.ref
         }
+        // The loop role a dispatch gave it (juancode-8oa5.7) leads the detail.
+        if let role = member.role {
+            detail = [role, detail].compactMap { $0 }.joined(separator: " · ")
+            help = "\(role) — \(help)"
+        }
     }
 }
 

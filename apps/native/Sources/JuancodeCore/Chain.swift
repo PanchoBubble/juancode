@@ -38,14 +38,18 @@ public struct ChainMember: Codable, Sendable, Equatable, Hashable {
     public var url: String?
     /// Epoch ms the item joined this chain.
     public var addedAt: Int
+    /// The loop role a dispatch gave it (`orchestrator`, `planner`, `implementer`,
+    /// `tester`); nil in an unroled chain.
+    public var role: String?
 
     public init(kind: ChainMemberKind, ref: String, title: String? = nil, url: String? = nil,
-                addedAt: Int = 0) {
+                addedAt: Int = 0, role: String? = nil) {
         self.kind = kind
         self.ref = ref
         self.title = title
         self.url = url
         self.addedAt = addedAt
+        self.role = role
     }
 }
 

@@ -121,6 +121,22 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(frame.rows).toBeUndefined();
     expect(String(frame.dispatchId)).toMatch(UUID_RE);
     expect(frame).not.toHaveProperty("fromSessionId");
+    expect(frame).not.toHaveProperty("role");
+  });
+
+  it("sends a role and appends its template between the task and the RESULT contract", async () => {
+    await startServer((msg, sock) => {
+      if (msg.type !== "create") return;
+      sock.send(JSON.stringify({ type: "created", session: { id: "s-1" } }));
+    });
+
+    await dispatch({ project: "/abs/repo", prompt: "verify juancode-x.1", role: "tester" });
+
+    const frame = received[0]!;
+    expect(frame.role).toBe("tester");
+    expect(frame.initialInput).toMatch(
+      /^verify juancode-x\.1\n\nYour role: tester\.[\s\S]*chain_ask[\s\S]*\n\nWhen you finish/,
+    );
   });
 
   it("does not repeat pre-routing dispatches after an upgrade", async () => {

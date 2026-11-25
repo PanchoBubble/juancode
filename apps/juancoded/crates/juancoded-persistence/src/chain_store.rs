@@ -193,7 +193,7 @@ impl ChainStore for SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut stmt = conn.prepare(
-            "SELECT chain_slug, kind, ref, title, url, added_at, done FROM chain_members \
+            "SELECT chain_slug, kind, ref, title, url, added_at, done, role FROM chain_members \
              ORDER BY added_at ASC, rowid ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -206,10 +206,11 @@ impl ChainStore for SqliteStore {
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, bool>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
         for row in rows {
-            let (slug, kind, ref_id, title, url, added_at, done) = row?;
+            let (slug, kind, ref_id, title, url, added_at, done, role) = row?;
             // A kind a newer build wrote is skipped rather than guessed at.
             let Some(kind) = ChainMemberKind::parse(&kind) else {
                 continue;
@@ -222,6 +223,7 @@ impl ChainStore for SqliteStore {
                     url,
                     added_at,
                     done,
+                    role,
                 });
             }
         }
@@ -267,11 +269,11 @@ impl ChainStore for SqliteStore {
         let tx = conn.transaction()?;
         let previous = previous_chain(&tx, member.kind, &member.ref_id)?;
         tx.execute(
-            "INSERT INTO chain_members (kind, ref, chain_slug, title, url, added_at, done) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+            "INSERT INTO chain_members (kind, ref, chain_slug, title, url, added_at, done, role) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(kind, ref) DO UPDATE SET chain_slug = excluded.chain_slug, \
              title = excluded.title, url = excluded.url, added_at = excluded.added_at, \
-             done = excluded.done",
+             done = excluded.done, role = excluded.role",
             params![
                 member.kind.as_str(),
                 member.ref_id,
@@ -279,7 +281,8 @@ impl ChainStore for SqliteStore {
                 member.title,
                 member.url,
                 member.added_at,
-                member.done
+                member.done,
+                member.role
             ],
         )?;
         tx.commit()?;
@@ -409,6 +412,7 @@ mod tests {
             url: None,
             added_at: at,
             done: false,
+            role: None,
         }
     }
 
@@ -425,9 +429,9 @@ mod tests {
             ticket.url = Some("https://linear.app/x/issue/ENG-1".into());
             ticket.done = true;
             store.set_member("auth-rewrite", &ticket).unwrap();
-            store
-                .set_member("auth-rewrite", &member(ChainMemberKind::Session, "s1", 4))
-                .unwrap();
+            let mut tester = member(ChainMemberKind::Session, "s1", 4);
+            tester.role = Some("tester".into());
+            store.set_member("auth-rewrite", &tester).unwrap();
             assert!(store
                 .set_chain_state("billing", ChainState::Inactive, Some(9))
                 .unwrap());
@@ -447,6 +451,8 @@ mod tests {
         );
         assert_eq!(chains[0].members[1].kind, ChainMemberKind::Session);
         assert!(!chains[0].members[1].done);
+        assert_eq!(chains[0].members[1].role.as_deref(), Some("tester"));
+        assert_eq!(chains[0].members[0].role, None);
         assert_eq!(chains[1].state, ChainState::Inactive);
         assert_eq!(chains[1].closed_at, Some(9));
         let _ = std::fs::remove_dir_all(dir);

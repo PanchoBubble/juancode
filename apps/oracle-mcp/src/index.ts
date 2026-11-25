@@ -93,6 +93,7 @@ import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-res
 import { onSessionExit, onSessionDeleted, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { askHuman } from "./chain-ask.ts";
+import { isRole, ROLES } from "./roles.ts";
 import { registerChainTools } from "./chain-tools.ts";
 import { HandoffRefused, handOffSession, handoffSummary } from "./session-handoff.ts";
 import { fail, ok, tool } from "./tool-result.ts";
@@ -211,6 +212,12 @@ function buildServer(): McpServer {
           .optional()
           .describe(
             "Your own session id: $CLAUDE_CODE_SESSION_ID in a Claude Code shell, or a juancode session id or unique prefix. The new session joins your chain, which is started for you if you are in none. Omitted, the dispatching Oracle is worked out from the live sessions.",
+          ),
+        role: z
+          .enum(ROLES)
+          .optional()
+          .describe(
+            "The new session's loop role. Its prompt template (duties, question format) is appended for you, so the prompt carries only the task; the role labels it on the chain card.",
           ),
       },
     },
@@ -892,6 +899,7 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       subscribe,
       model,
       complexity,
+      role,
     } = req.body ?? {};
     if (typeof project !== "string" || typeof prompt !== "string" || !project || !prompt) {
       res.status(400).send("project and prompt are required");
@@ -901,13 +909,15 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
       (model !== undefined && (typeof model !== "string" || !model.trim())) ||
       (complexity !== undefined && !["simple", "standard", "complex"].includes(complexity)) ||
       (provider !== undefined && !["claude", "codex", "opencode", "kimi"].includes(provider)) ||
-      (subscribe !== undefined && typeof subscribe !== "boolean")
+      (subscribe !== undefined && typeof subscribe !== "boolean") ||
+      (role !== undefined && role !== null && !isRole(role))
     ) {
-      res.status(400).send("Invalid provider, model, complexity, or subscribe");
+      res.status(400).send("Invalid provider, model, complexity, subscribe, or role");
       return;
     }
     const outcome = await dispatch({
       subscribe,
+      role: isRole(role) ? role : null,
       model,
       complexity,
       project,

@@ -794,6 +794,8 @@ export interface ChainMember {
   url?: string;
   /** Epoch ms the item joined this chain. */
   addedAt: number;
+  /** The loop role a dispatch gave it (orchestrator, planner, implementer, tester). */
+  role?: string;
 }
 
 export interface Chain {
@@ -1027,6 +1029,7 @@ function parseChainMember(raw: unknown): ChainMember | null {
   };
   if (typeof row.title === "string") member.title = row.title;
   if (typeof row.url === "string") member.url = row.url;
+  if (typeof row.role === "string") member.role = row.role;
   return member;
 }
 

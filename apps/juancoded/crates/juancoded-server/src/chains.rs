@@ -437,6 +437,8 @@ impl Chains {
             // joining again, and must not send it to the end of the chain.
             added_at: stays.map_or_else(now_ms, |m| m.added_at),
             done,
+            // Set by the dispatch that made it; a retag or a move keeps it.
+            role: previous.as_ref().and_then(|(_, m)| m.role.clone()),
         };
         let finished_here = done && stays.is_some_and(|m| !m.done);
         self.mutate(|store| {
@@ -462,9 +464,10 @@ impl Chains {
 
     /// Give a dispatch a chain even when its source is absent or no longer known.
     /// Prefer inheritance, and never move a session that already belongs to a chain.
-    pub fn chain_dispatch(&self, session_id: &str, from_session: Option<&str>) {
+    /// `role` is the dispatch's label for the new member (juancode-8oa5.7).
+    pub fn chain_dispatch(&self, session_id: &str, from_session: Option<&str>, role: Option<&str>) {
         if let Some(from) = from_session {
-            self.inherit(from, ChainMemberKind::Session, session_id, None, None);
+            self.inherit_as(from, ChainMemberKind::Session, session_id, None, None, role);
         }
         let Some(session) = self.sessions.meta(session_id) else {
             return;
@@ -489,6 +492,7 @@ impl Chains {
                         url: None,
                         added_at: now_ms(),
                         done: false,
+                        role: role.map(str::to_string),
                     },
                 )
                 .map_err(store_failed)?;
@@ -528,6 +532,19 @@ impl Chains {
         title: Option<String>,
         url: Option<String>,
     ) -> Option<String> {
+        self.inherit_as(from_session, kind, ref_id, title, url, None)
+    }
+
+    /// [`Self::inherit`], giving the joining item a role label.
+    fn inherit_as(
+        &self,
+        from_session: &str,
+        kind: ChainMemberKind,
+        ref_id: &str,
+        title: Option<String>,
+        url: Option<String>,
+        role: Option<&str>,
+    ) -> Option<String> {
         if ref_id.trim().is_empty() || from_session == ref_id {
             return None;
         }
@@ -565,6 +582,7 @@ impl Chains {
                         url: None,
                         added_at: now_ms(),
                         done: false,
+                        role: None,
                     };
                     store.set_member(&slug, &parent).map_err(store_failed)?;
                     started = true;
@@ -581,6 +599,7 @@ impl Chains {
                 // Only an item in no chain inherits one, so there is no earlier report
                 // to keep.
                 done: false,
+                role: role.map(str::to_string),
             };
             store.set_member(&slug, &member).map_err(store_failed)?;
             joined = Some(slug.clone());

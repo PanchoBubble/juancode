@@ -339,6 +339,10 @@ pub enum ClientMessage {
         /// chain all leave it untagged, which is also what a core without
         /// `chainInherit` does with it.
         from_session_id: Option<String>,
+        /// The new session's role label in the chain it joins (juancode-8oa5.7), e.g.
+        /// `implementer`. Only read with a dispatch or `fromSessionId`; a blank or
+        /// over-long label reads as none.
+        role: Option<String>,
     },
     Attach {
         session_id: String,
@@ -951,6 +955,8 @@ struct RawClient {
     dispatch_id: Option<String>,
     #[serde(rename = "fromSessionId", default)]
     from_session_id: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
     #[serde(rename = "sessionId", default)]
     session_id: Option<String>,
     #[serde(default)]
@@ -1101,6 +1107,10 @@ impl ClientMessage {
                 reclaim_slot: raw.reclaim_slot,
                 dispatch_id: raw.dispatch_id,
                 from_session_id: raw.from_session_id.filter(|s| !s.is_empty()),
+                role: raw
+                    .role
+                    .map(|r| r.trim().to_string())
+                    .filter(|r| !r.is_empty() && r.len() <= 32),
             }),
             "attach" => Ok(Self::Attach {
                 session_id: need_session()?,
@@ -2261,6 +2271,7 @@ mod tests {
                 reclaim_slot: None,
                 dispatch_id: None,
                 from_session_id: None,
+                role: None,
             }
         );
     }
@@ -2268,11 +2279,11 @@ mod tests {
     #[test]
     fn create_and_track_pr_carry_the_session_they_came_from() {
         let create = ClientMessage::decode(
-            r#"{"type":"create","provider":"claude","cwd":"/tmp","fromSessionId":"oracle-1"}"#,
+            r#"{"type":"create","provider":"claude","cwd":"/tmp","fromSessionId":"oracle-1","role":" tester "}"#,
         )
         .unwrap();
         assert!(
-            matches!(&create, ClientMessage::Create { from_session_id: Some(s), .. } if s == "oracle-1"),
+            matches!(&create, ClientMessage::Create { from_session_id: Some(s), role: Some(r), .. } if s == "oracle-1" && r == "tester"),
             "{create:?}"
         );
         let track = ClientMessage::decode(
@@ -2703,6 +2714,7 @@ mod tests {
                 url: None,
                 added_at: 3,
                 done: false,
+                role: None,
             }],
         };
         assert_eq!(

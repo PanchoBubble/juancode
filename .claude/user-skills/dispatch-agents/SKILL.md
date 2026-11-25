@@ -102,7 +102,11 @@ this table too.
    provider supported by the running sidecar). Optional fields:
    `worktree` (default here: true — set false only when the user wants it in the main
    checkout), `ticket` (a ticket id; enforces one live session per ticket — pass it
-   whenever the work is a ticket). `fromSessionId` puts the new session in this
+   whenever the work is a ticket), `role` (`orchestrator`, `planner`, `implementer` or
+   `tester`: labels the child on the chain card and appends that role's prompt template
+   — duties and the `chain_ask` question format — so your prompt carries only the task;
+   the templates live only in `apps/oracle-mcp/src/roles.ts` in the juancode repo, never
+   paste them). `fromSessionId` puts the new session in this
    session's chain. Use your CLI session id (`CLAUDE_CODE_SESSION_ID` or
    `CODEX_THREAD_ID` when available), or a known juancode session id. An empty id is
    ignored; do not guess another session's id. Remove the temporary prompt directory

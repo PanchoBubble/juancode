@@ -1068,6 +1068,7 @@ fn handle_client_message(
             reclaim_slot: _,
             dispatch_id,
             from_session_id,
+            role,
         } => {
             let Some(provider_id) = ProviderId::parse(&provider) else {
                 outbound.push(ServerMessage::Error {
@@ -1101,7 +1102,7 @@ fn handle_client_message(
                     // behind it already lists the session it was just told about.
                     if let Some(chains) = chains {
                         if meta.dispatch_id.is_some() || from_session_id.is_some() {
-                            chains.chain_dispatch(&id, from_session_id.as_deref());
+                            chains.chain_dispatch(&id, from_session_id.as_deref(), role.as_deref());
                         }
                     }
                     attached.insert(id.clone());
@@ -4193,7 +4194,7 @@ mod tests {
             .unwrap();
         wire.step(ClientMessage::SubscribeChains, &mut fanout);
 
-        let dispatch = |from: Option<String>| ClientMessage::Create {
+        let dispatch = |from: Option<String>, role: Option<&str>| ClientMessage::Create {
             provider: "claude".into(),
             cwd: "/tmp".into(),
             cols: None,
@@ -4207,6 +4208,7 @@ mod tests {
             reclaim_slot: None,
             dispatch_id: None,
             from_session_id: from,
+            role: role.map(str::to_string),
         };
         let created_id = |frames: &[ServerMessage]| {
             frames
@@ -4218,7 +4220,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("no created in {frames:?}"))
         };
 
-        let sent = wire.step(dispatch(Some(oracle.clone())), &mut fanout);
+        let sent = wire.step(
+            dispatch(Some(oracle.clone()), Some("implementer")),
+            &mut fanout,
+        );
         let child = created_id(&sent);
         assert_eq!(
             chain_book(&wire)
@@ -4226,6 +4231,26 @@ mod tests {
                 .as_deref(),
             Some("auth-rewrite")
         );
+        let role_of = |wire: &Wire, id: &str| {
+            chain_book(wire).list()[0]
+                .members
+                .iter()
+                .find(|m| m.ref_id == id)
+                .and_then(|m| m.role.clone())
+        };
+        assert_eq!(role_of(&wire, &child).as_deref(), Some("implementer"));
+        // A retag (a person moving or refreshing the member) keeps the dispatch's role.
+        chain_book(&wire)
+            .set_member(
+                ChainMemberKind::Session,
+                &child,
+                Some("auth-rewrite"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(role_of(&wire, &child).as_deref(), Some("implementer"));
+        assert_eq!(role_of(&wire, &oracle), None);
         let created_at = sent
             .iter()
             .position(|f| matches!(f, ServerMessage::Created { .. }))
@@ -4240,7 +4265,7 @@ mod tests {
         );
 
         // No hint, no chain: an ordinary create is untouched.
-        let plain = created_id(&wire.step(dispatch(None), &mut fanout));
+        let plain = created_id(&wire.step(dispatch(None, None), &mut fanout));
         assert_eq!(
             chain_book(&wire).chain_of(ChainMemberKind::Session, &plain),
             None
@@ -4248,7 +4273,7 @@ mod tests {
 
         // A dispatch from a session in no chain starts one holding both.
         let loner = wire.session();
-        let sent = wire.step(dispatch(Some(loner.clone())), &mut fanout);
+        let sent = wire.step(dispatch(Some(loner.clone()), None), &mut fanout);
         let orphan = created_id(&sent);
         let started = chain_book(&wire)
             .chain_of(ChainMemberKind::Session, &orphan)
@@ -4293,6 +4318,7 @@ mod tests {
                     reclaim_slot: None,
                     dispatch_id: Some(uuid::Uuid::new_v4().to_string()),
                     from_session_id: from,
+                    role: None,
                 },
                 &mut fanout,
             );
@@ -4319,7 +4345,7 @@ mod tests {
                 })
                 .expect("publish a named chain holding the dispatched session");
             assert!(created_at < chain_at);
-            chains.chain_dispatch(&session.id, None);
+            chains.chain_dispatch(&session.id, None, None);
             assert_eq!(
                 chains.chain_of(ChainMemberKind::Session, &session.id),
                 Some(slug)

@@ -31,6 +31,7 @@ import { nativeApiBase, nativeWsUrl, oracleDir, serverInfoCapabilities } from ".
 import { sessionNotifications } from "./session-notifications.ts";
 import { markQueuedDispatch } from "./dispatch-results.ts";
 import { RESULT_CONTRACT } from "./result-block.ts";
+import { rolePrompt, type Role } from "./roles.ts";
 import { recordDispatch, type TriggerOrigin } from "./dispatch-registry.ts";
 import {
   listDispatchStatuses,
@@ -78,6 +79,9 @@ export interface DispatchRequest {
    *  joins that session's chain (see dispatch-origin.ts). Sent on `create` only to a
    *  core advertising `chainInherit`; not part of the request's fingerprint. */
   fromSessionId?: string | null;
+  /** The new session's loop role (roles.ts): its template follows the prompt, and the
+   *  role is its label in the chain it joins. */
+  role?: Role | null;
 }
 
 export interface DispatchOutcome {
@@ -298,11 +302,14 @@ function dispatchCreateFrame(
     // CLI at the desktop's real terminal size. Sending a nominal one printed
     // the entire first turn at that width, and no later resize can rewrap
     // what's already in the scrollback.
-    initialInput: `${opts.prompt}\n\n${RESULT_CONTRACT}`,
+    initialInput: [opts.prompt, opts.role && rolePrompt(opts.role), RESULT_CONTRACT]
+      .filter(Boolean)
+      .join("\n\n"),
     skipPermissions: true,
     isolateWorktree: opts.worktree ?? false,
     dispatchId,
     ...(inherit ? { fromSessionId: opts.fromSessionId } : {}),
+    ...(opts.role ? { role: opts.role } : {}),
   };
 }
 

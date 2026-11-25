@@ -355,6 +355,10 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE sessions ADD COLUMN prompt_delivery TEXT;
     "#,
+    // 19: a chain member's role label (juancode-8oa5.7). NULL is an unroled member.
+    r#"
+    ALTER TABLE chain_members ADD COLUMN role TEXT;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {
