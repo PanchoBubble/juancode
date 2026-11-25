@@ -90,6 +90,19 @@ describe("durable session notifications", () => {
     expect(await store.inbox("match")).toHaveLength(1);
   });
 
+  it("delivers only the child's RESULT block, falling back to truncated output", async () => {
+    const { store, output } = make();
+    await store.subscribe({ subscriber: "p", targetType: "session", targetId: "child" });
+    output.mockResolvedValue("noisy log\n".repeat(50) + "RESULT\nstatus: done\nchanged: x");
+    await store.publish(event("idle"));
+    await store.publish(event("busy"));
+    output.mockResolvedValue("y".repeat(7000));
+    await store.publish(event("idle"));
+    const [fallback, block] = await store.inbox("p");
+    expect(block!.output).toBe("RESULT\nstatus: done\nchanged: x");
+    expect(fallback!.output).toBe("y".repeat(6000));
+  });
+
   it("persists filters and updates a subscription without changing its identity", async () => {
     const dir = mkdtempSync(join(tmpdir(), "notification-filter-"));
     dirs.push(dir);

@@ -110,7 +110,9 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(frame.provider).toBe("codex");
     expect(frame.model).toBe("gpt-6.1-sol");
     expect(frame.cwd).toBe("/abs/repo");
-    expect(frame.initialInput).toBe("seed it");
+    expect(frame.initialInput).toMatch(
+      /^seed it\n\nWhen you finish, end your final message with exactly this block[\s\S]*RESULT\nstatus:/,
+    );
     expect(frame.skipPermissions).toBe(true);
     expect(frame.isolateWorktree).toBe(true);
     // No grid is sent: the app boots the CLI at the desktop's real terminal size,

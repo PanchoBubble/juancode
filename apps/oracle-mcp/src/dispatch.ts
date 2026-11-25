@@ -30,6 +30,7 @@ import { WebSocket } from "ws";
 import { nativeApiBase, nativeWsUrl, oracleDir, serverInfoCapabilities } from "./oracle.ts";
 import { sessionNotifications } from "./session-notifications.ts";
 import { markQueuedDispatch } from "./dispatch-results.ts";
+import { RESULT_CONTRACT } from "./result-block.ts";
 import { recordDispatch, type TriggerOrigin } from "./dispatch-registry.ts";
 import {
   listDispatchStatuses,
@@ -297,7 +298,7 @@ function dispatchCreateFrame(
     // CLI at the desktop's real terminal size. Sending a nominal one printed
     // the entire first turn at that width, and no later resize can rewrap
     // what's already in the scrollback.
-    initialInput: opts.prompt,
+    initialInput: `${opts.prompt}\n\n${RESULT_CONTRACT}`,
     skipPermissions: true,
     isolateWorktree: opts.worktree ?? false,
     dispatchId,
