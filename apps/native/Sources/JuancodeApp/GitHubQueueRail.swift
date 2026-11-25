@@ -357,7 +357,9 @@ struct RightRailPanels: View {
     }
 
     private var chainsNeedingYou: Int {
-        model.chains.active.reduce(0) { $0 + model.chainAttention($1).total }
+        // A chain's attention already counts the chains nested under it.
+        model.chains.active.filter { !model.chains.isNested($0) }
+            .reduce(0) { $0 + model.chainAttention($1).total }
     }
 
     // MARK: Overview selector

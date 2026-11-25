@@ -15,18 +15,21 @@ import CoreGraphics
 /// Pure over a `Chain`, its handoffs and the links the app read off its own records,
 /// so the graph is tested without a model or a view.
 
-/// One node: a chain member, the human end of a handoff, or a session a handoff names
-/// that is not (or no longer) in this chain.
+/// One node: a chain member, the human end of a handoff, a session a handoff names
+/// that is not (or no longer) in this chain, or a chain nested under this one, drawn
+/// collapsed (juancode-i38u).
 public enum ChainGraphNodeID: Hashable, Sendable {
     case member(ChainMemberRef)
     case human
     case outsideSession(String)
+    case chain(String)
 
     public var key: String {
         switch self {
         case let .member(ref): return "member:\(ref.key)"
         case .human: return "human"
         case let .outsideSession(id): return "outside:\(id)"
+        case let .chain(slug): return "chain:\(slug)"
         }
     }
 }
@@ -42,6 +45,9 @@ public enum ChainGraphEdgeKind: Equatable, Sendable {
     case watchesPr
     /// A tracked Linear ticket names the session working it: session → ticket.
     case tracksTicket
+    /// A nested chain's sub-orchestrator names this member as the session that
+    /// dispatched it (its `parentSessionId`): session → nested chain.
+    case dispatchesChain
 
     public var title: String {
         switch self {
@@ -49,6 +55,7 @@ public enum ChainGraphEdgeKind: Equatable, Sendable {
         case .handoffIssue: return "Handoff issue"
         case .watchesPr: return "Watches PR"
         case .tracksTicket: return "Tracks ticket"
+        case .dispatchesChain: return "Dispatched chain"
         }
     }
 }
@@ -68,6 +75,19 @@ public struct ChainGraphLink: Equatable, Sendable {
     }
 }
 
+/// A chain nested directly under the graphed one, and the session that dispatched its
+/// orchestrator, as that session recorded it. `ChainGraph.build` draws the edge only
+/// when the dispatcher is a session member of the graphed chain.
+public struct ChainGraphSubchain: Equatable, Sendable {
+    public var slug: String
+    public var dispatcher: String?
+
+    public init(slug: String, dispatcher: String?) {
+        self.slug = slug
+        self.dispatcher = dispatcher
+    }
+}
+
 public struct ChainGraphEdge: Equatable, Sendable, Identifiable {
     public var id: String
     public var from: ChainGraphNodeID
@@ -82,6 +102,7 @@ public struct ChainGraphEdge: Equatable, Sendable, Identifiable {
         case let .handoffIssue(h): return h.beadsIssue ?? "Issue"
         case .watchesPr: return "watches"
         case .tracksTicket: return "tracks"
+        case .dispatchesChain: return "dispatched"
         }
     }
 
@@ -89,7 +110,7 @@ public struct ChainGraphEdge: Equatable, Sendable, Identifiable {
     public var handoff: ChainHandoff? {
         switch kind {
         case let .handoff(h), let .handoffIssue(h): return h
-        case .watchesPr, .tracksTicket: return nil
+        case .watchesPr, .tracksTicket, .dispatchesChain: return nil
         }
     }
 
@@ -121,10 +142,13 @@ public struct ChainGraph: Equatable, Sendable {
     public var isEmpty: Bool { groups.isEmpty && unconnected.isEmpty }
 
     /// Build the graph for `chain`. `handoffs` may include other chains' records; only
-    /// this chain's are used. `links` are the app's explicit non-handoff links.
+    /// this chain's are used. `links` are the app's explicit non-handoff links;
+    /// `subchains` the chains nested directly under it, each one node after the members.
     public static func build(chain: Chain, handoffs: [ChainHandoff],
-                             links: [ChainGraphLink] = []) -> ChainGraph {
+                             links: [ChainGraphLink] = [],
+                             subchains: [ChainGraphSubchain] = []) -> ChainGraph {
         let memberIds = chain.members.map { ChainGraphNodeID.member($0.memberRef) }
+            + subchains.map { ChainGraphNodeID.chain($0.slug) }
         let memberSet = Set(memberIds)
         func node(_ owner: ChainHandoffOwner) -> ChainGraphNodeID {
             switch owner {
@@ -154,6 +178,14 @@ public struct ChainGraph: Equatable, Sendable {
             let id = "link:\(link.kind.title):\(link.from.key)->\(link.to.key)"
             guard seenLinks.insert(id).inserted else { continue }
             edges.append(ChainGraphEdge(id: id, from: .member(link.from), to: .member(link.to), kind: link.kind))
+        }
+
+        for sub in subchains {
+            guard let from = sub.dispatcher,
+                  chain.contains(ChainMemberRef(kind: .session, ref: from)) else { continue }
+            let ref = ChainMemberRef(kind: .session, ref: from)
+            edges.append(ChainGraphEdge(id: "subchain:\(sub.slug)", from: .member(ref),
+                                        to: .chain(sub.slug), kind: .dispatchesChain))
         }
 
         // Every node in join order: members first, then the extra ends handoffs named.

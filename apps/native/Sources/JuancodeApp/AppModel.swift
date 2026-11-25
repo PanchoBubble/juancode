@@ -5793,6 +5793,18 @@ final class AppModel {
         }
     }
 
+    /// The chains nested directly under `chain`, each with the session that dispatched
+    /// its orchestrator: the daemon records the dispatcher as the dispatched session's
+    /// `parentSessionId` (juancode-25kc). An unroled child falls back to its first session.
+    func chainGraphSubchains(_ chain: Chain) -> [ChainGraphSubchain] {
+        chains.children(of: chain.slug).map { child in
+            let sessions = child.members.filter { $0.kind == .session }
+            let orchestrator = sessions.first { $0.role == "orchestrator" } ?? sessions.first
+            let dispatcher = orchestrator.flatMap { o in self.sessions.first { $0.id == o.ref }?.parentSessionId }
+            return ChainGraphSubchain(slug: child.slug, dispatcher: dispatcher)
+        }
+    }
+
     private func applyChains(_ book: ChainBook) {
         chains = book
         reconcileChainView()

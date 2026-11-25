@@ -20,4 +20,22 @@ import Testing
         #expect(book.sessionRefs(under: "other") == ["elsewhere"])
         #expect(book.sessionRefs(under: "missing").isEmpty)
     }
+
+    @Test func attentionAndOutlineCoverEveryNestedChain() {
+        // juancode-i38u: a parent's attention counts grandchildren; the rail outline
+        // puts each nested chain under its parent, and a cycle still ends.
+        let book = ChainBook([
+            chain("loop", ["orch"]),
+            chain("sub", ["impl"], parent: "loop"),
+            chain("subsub", ["deep"], parent: "sub"),
+            chain("orphan", ["o"], parent: "gone"),
+        ])
+        let waiting: Set = ["orch", "deep", "o"]
+        let attention = ChainAttention(book.subtree(of: "loop"), waiting: { waiting.contains($0) }, deciding: { _ in false })
+        #expect(attention.waitingInput == 2)
+        let roots = book.chains.filter { !book.isNested($0) }
+        #expect(book.outline(roots).map { "\($0.chain.slug):\($0.depth)" } == ["loop:0", "sub:1", "subsub:2", "orphan:0"])
+        let cyclic = ChainBook([chain("a", [], parent: "b"), chain("b", [], parent: "a")])
+        #expect(cyclic.subtree(of: "a").map(\.slug) == ["a", "b"])
+    }
 }

@@ -178,9 +178,10 @@ struct ChainOverviewView: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.08)))
 
             ChainHandoffsPanel(chain: chain)
-            ChainSubchainNodes(children: model.chains.children(of: chain.slug))
+            // The graph draws nested chains as nodes (juancode-i38u); the list keeps the strip.
+            if mode == .list { ChainSubchainNodes(children: model.chains.children(of: chain.slug)) }
 
-            if mode == .graph && !chain.members.isEmpty {
+            if mode == .graph && !(chain.members.isEmpty && model.chains.children(of: chain.slug).isEmpty) {
                 ChainGraphView(chain: chain, query: query)
             } else if sections.isEmpty {
                 ContentUnavailableView(

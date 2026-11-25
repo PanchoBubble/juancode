@@ -15,6 +15,22 @@ import Testing
                      summary: "step \(id)", createdAt: at, updatedAt: at, state: state)
     }
 
+    @Test func nestedChainHangsOffTheSessionThatDispatchedIt() {
+        // juancode-i38u: a child chain is a node; its edge comes from the dispatcher the
+        // sub-orchestrator recorded, and only when that dispatcher is a member here.
+        let chain = Chain(slug: "loop", members: [session("orch"), session("impl")])
+        let graph = ChainGraph.build(chain: chain, handoffs: [], subchains: [
+            ChainGraphSubchain(slug: "sub", dispatcher: "orch"),
+            ChainGraphSubchain(slug: "stray", dispatcher: "someone-else"),
+            ChainGraphSubchain(slug: "unknown", dispatcher: nil),
+        ])
+        #expect(graph.edges.map(\.id) == ["subchain:sub"])
+        #expect(graph.edges.first?.from == ref(session("orch")))
+        #expect(graph.edges.first?.to == .chain("sub"))
+        #expect(graph.groups.first?.columns == [[ref(session("orch"))], [.chain("sub")]])
+        #expect(graph.unconnected == [ref(session("impl")), .chain("stray"), .chain("unknown")])
+    }
+
     @Test func membershipAloneDrawsNoConnection() {
         // The board-access shape: sessions, a ticket and a PR with no handoff history.
         let chain = Chain(slug: "board-access", members: [

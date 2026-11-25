@@ -138,21 +138,43 @@ public struct ChainBook: Sendable, Equatable {
         chains.filter { $0.parent == slug }
     }
 
+    /// `slug` and every chain nested under it, however deep, parents before their
+    /// children (juancode-i38u). A parent cycle ends; an unknown slug gives nothing.
+    public func subtree(of slug: String) -> [Chain] {
+        var seen: Set<String> = [], out: [Chain] = [], queue = [slug]
+        while !queue.isEmpty {
+            let at = queue.removeFirst()
+            guard seen.insert(at).inserted, let chain = self[at] else { continue }
+            out.append(chain)
+            queue += children(of: at).map(\.slug)
+        }
+        return out
+    }
+
+    /// Whether `chain` nests under a chain this book holds; a parent that is gone
+    /// leaves it at the top.
+    public func isNested(_ chain: Chain) -> Bool {
+        chain.parent.map { self[$0] != nil } ?? false
+    }
+
+    /// `roots` with every chain nested under each, depth first, children oldest first,
+    /// each with its depth: the rail's outline (juancode-i38u). A parent cycle ends.
+    public func outline(_ roots: [Chain]) -> [(chain: Chain, depth: Int)] {
+        var seen: Set<String> = [], out: [(chain: Chain, depth: Int)] = []
+        func walk(_ chain: Chain, _ depth: Int) {
+            guard seen.insert(chain.slug).inserted else { return }
+            out.append((chain, depth))
+            for child in children(of: chain.slug) { walk(child, depth + 1) }
+        }
+        for root in roots { walk(root, 0) }
+        return out
+    }
+
     /// Every session in `slug` and in each chain nested under it, however deep
     /// (juancode-8oa5.12) — what the chain's token total sums. A parent cycle ends.
     /// Mirrors `chainTokens` in the sidecar's chains.ts.
     public func sessionRefs(under slug: String) -> Set<String> {
-        var seen: Set<String> = [], refs: Set<String> = [], queue = [slug]
-        while let at = queue.popLast() {
-            guard seen.insert(at).inserted else { continue }
-            for chain in chains {
-                if chain.slug == at {
-                    refs.formUnion(chain.members.filter { $0.kind == .session }.map(\.ref))
-                }
-                if chain.parent == at { queue.append(chain.slug) }
-            }
-        }
-        return refs
+        Set(subtree(of: slug).flatMap { $0.members.filter { $0.kind == .session }.map(\.ref) })
     }
 
     /// The chain an item is in, if any.

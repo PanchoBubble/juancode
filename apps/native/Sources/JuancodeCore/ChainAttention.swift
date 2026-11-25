@@ -22,6 +22,15 @@ public struct ChainAttention: Equatable, Sendable {
             needsDecision: chain.members.filter { $0.kind == .trackedPr && deciding($0.ref) }.count)
     }
 
+    /// Summed over `chains`: a chain with everything nested under it (juancode-i38u).
+    public init(_ chains: [Chain], waiting: (String) -> Bool, deciding: (String) -> Bool) {
+        self = chains.map { ChainAttention($0, waiting: waiting, deciding: deciding) }
+            .reduce(ChainAttention()) {
+                ChainAttention(waitingInput: $0.waitingInput + $1.waitingInput,
+                               needsDecision: $0.needsDecision + $1.needsDecision)
+            }
+    }
+
     public var total: Int { waitingInput + needsDecision }
     public var isEmpty: Bool { total == 0 }
 }

@@ -12,8 +12,9 @@ struct ChainsRailPanel: View {
     @AppStorage("chains.rail.showInactive") private var showInactive = false
 
     var body: some View {
-        let active = model.chains.active
-        let inactive = model.chains.inactive
+        // Nested chains sit under their parent, whose row counts their attention too.
+        let active = model.chains.outline(model.chains.active.filter { !model.chains.isNested($0) })
+        let inactive = model.chains.outline(model.chains.inactive.filter { !model.chains.isNested($0) })
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if model.supportsChains {
@@ -30,11 +31,11 @@ struct ChainsRailPanel: View {
                          ? "No chains yet. Tag sessions, PRs and tickets into one to group related work."
                          : "No active chains.")
                 }
-                ForEach(active) { ChainRailRow(chain: $0) }
+                ForEach(active, id: \.chain.slug) { ChainRailRow(chain: $0.chain, depth: $0.depth) }
                 if !inactive.isEmpty {
                     inactiveToggle(count: inactive.count)
                     if showInactive {
-                        ForEach(inactive) { ChainRailRow(chain: $0) }
+                        ForEach(inactive, id: \.chain.slug) { ChainRailRow(chain: $0.chain, depth: $0.depth) }
                     }
                 }
             }
@@ -79,6 +80,7 @@ struct ChainsRailPanel: View {
 private struct ChainRailRow: View {
     @Environment(AppModel.self) private var model
     let chain: Chain
+    var depth = 0
     @State private var hovering = false
     @State private var targeted = false
 
@@ -117,6 +119,7 @@ private struct ChainRailRow: View {
             .opacity(targeted ? 1 : 0))
         .opacity(chain.isActive ? 1 : 0.6)
         .padding(.horizontal, 6)
+        .padding(.leading, CGFloat(depth) * 12)
         .contentShape(Rectangle())
         .onTapGesture { model.openChain(slug: chain.slug) }
         .onHover { hovering = $0 }
@@ -195,10 +198,10 @@ enum ChainDrop {
 }
 
 extension AppModel {
-    /// What in `chain` is waiting on you: sessions at a prompt, tracked PRs with an
-    /// open decision.
+    /// What in `chain`, or any chain nested under it, is waiting on you: sessions at a
+    /// prompt, tracked PRs with an open decision.
     func chainAttention(_ chain: Chain) -> ChainAttention {
-        ChainAttention(chain,
+        ChainAttention(chains.subtree(of: chain.slug),
                        waiting: { activity($0) == .waitingInput },
                        deciding: { tracked[$0].map { !$0.notifications.isEmpty } ?? false })
     }

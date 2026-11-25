@@ -31,7 +31,8 @@ struct ChainGraphView: View {
     var body: some View {
         let graph = ChainGraph.build(chain: chain,
                                      handoffs: model.chainHandoffs.handoffs(in: chain.slug),
-                                     links: model.chainGraphLinks(chain))
+                                     links: model.chainGraphLinks(chain),
+                                     subchains: model.chainGraphSubchains(chain))
         let rows = Dictionary(model.chainDetailRows(chain).map { ($0.id, $0) },
                               uniquingKeysWith: { a, _ in a })
         let names = ChainGraphNames(model: model, rows: rows)
@@ -115,8 +116,11 @@ struct ChainGraphView: View {
         } else {
             parts.append("Handoffs unavailable on this daemon")
         }
-        let links = edges.count - handoffs - edges.filter { if case .handoffIssue = $0.kind { return true } else { return false } }.count
+        let links = edges.filter { $0.kind == .watchesPr || $0.kind == .tracksTicket }.count
         if links > 0 { parts.append("\(links) tracking link\(links == 1 ? "" : "s")") }
+        let nested = graph.groups.flatMap(\.nodes).filter { if case .chain = $0 { return true } else { return false } }.count
+            + graph.unconnected.filter { if case .chain = $0 { return true } else { return false } }.count
+        if nested > 0 { parts.append("\(nested) nested chain\(nested == 1 ? "" : "s")") }
         if !graph.unconnected.isEmpty { parts.append("\(graph.unconnected.count) unconnected") }
         return parts.joined(separator: " · ")
     }
@@ -225,6 +229,7 @@ struct ChainGraphNames {
         case .human: return "You"
         case let .outsideSession(id):
             return model.sessions.first { $0.id == id }?.title ?? "Session \(id.prefix(8))"
+        case let .chain(slug): return model.chains[slug]?.name ?? slug
         }
     }
 }
@@ -251,6 +256,7 @@ struct ChainGraphNodeCard: View {
         case let .outsideSession(id):
             guard model.sessions.contains(where: { $0.id == id }) else { return }
             model.selection = id
+        case let .chain(slug): model.openChain(slug: slug)
         }
     }
 
@@ -345,6 +351,22 @@ private struct ChainGraphCardFace {
     @MainActor
     init(node: ChainGraphNodeID, row: ChainDetailRow?, model: AppModel, names: ChainGraphNames) {
         switch node {
+        case let .chain(slug):
+            let child = model.chains[slug]
+            let attention = child.map { model.chainAttention($0).total } ?? 0
+            let members = child?.members.count ?? 0
+            icon = "point.3.connected.trianglepath.dotted"
+            kicker = "Nested chain"
+            title = names.title(node)
+            status = attention > 0 ? "\(attention) need\(attention == 1 ? "s" : "") you"
+                : (child?.isActive == false ? "Closed" : "Active")
+            dot = attention > 0 ? .orange : (child?.isActive == false ? .secondary : .green)
+            accent = .purple
+            footer = "\(members) member\(members == 1 ? "" : "s")"
+                + (model.chains.children(of: slug).isEmpty ? "" : " · has nested chains")
+            missing = child == nil
+            help = "Open the nested chain \(title); attention counts its own nested chains too"
+            opens = child != nil
         case .human:
             icon = "person.fill"
             kicker = "Human"
@@ -536,13 +558,14 @@ extension ChainGraphEdge {
         case let .handoff(h): return h.isOpen ? .orange : .secondary
         case .handoffIssue: return .teal
         case .watchesPr, .tracksTicket: return .blue
+        case .dispatchesChain: return .purple
         }
     }
 
     var dashed: Bool {
         switch kind {
         case .handoff: return false
-        case .handoffIssue, .watchesPr, .tracksTicket: return true
+        case .handoffIssue, .watchesPr, .tracksTicket, .dispatchesChain: return true
         }
     }
 
@@ -552,6 +575,7 @@ extension ChainGraphEdge {
         case .handoffIssue: return "circle.hexagongrid"
         case .watchesPr: return "eye"
         case .tracksTicket: return "ticket"
+        case .dispatchesChain: return "point.3.connected.trianglepath.dotted"
         }
     }
 }
@@ -821,6 +845,8 @@ private struct ChainRelationshipDetail: View {
         } else {
             Text(edge.kind == .watchesPr
                  ? "The tracked PR's watch names this session as the one working it."
+                 : edge.kind == .dispatchesChain
+                 ? "This session dispatched the nested chain's orchestrator."
                  : "The tracked ticket names this session as the one working it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -848,7 +874,7 @@ private struct ChainRelationshipDetail: View {
             } else {
                 Text("\(title) — gone").foregroundStyle(.secondary)
             }
-        case .member:
+        case .member, .chain:
             Button(title) { ChainGraphNodeCard.open(node, model: model) }
                 .buttonStyle(.link).clickCursor().lineLimit(2)
         }
