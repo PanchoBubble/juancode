@@ -208,16 +208,11 @@ export class SessionNotifications {
       return Number(this.db.prepare(`DELETE FROM subscriptions WHERE ${where}`).run(id).changes);
     });
   }
-  private advance(row: SessionSubscription, event: NotificationEvent, actionable: boolean): void {
-    // Dispatch alerts follow the dispatched turn. Keep explicit session watches
-    // persistent, but retire dispatch watches at completion so later turns and
-    // process-exit frames cannot wake the caller again. The final outbox entry
-    // survives retirement and can still be retried after a disconnect.
-    if (
-      row.targetType === "dispatch" &&
-      actionable &&
-      ["idle", "exited", "failed"].includes(event.state)
-    ) {
+  private advance(row: SessionSubscription, event: NotificationEvent, finished: boolean): void {
+    // Dispatch alerts follow the child until it finishes; explicit session
+    // watches stay. Retiring stops later turns and exit frames from waking the
+    // caller again; the final outbox entry survives and can still be retried.
+    if (finished) {
       this.db.prepare("DELETE FROM subscriptions WHERE id = ?").run(row.id);
     } else {
       this.db
@@ -229,6 +224,14 @@ export class SessionNotifications {
     return this.serial(async () => {
       let output: string | undefined;
       let outputError: string | undefined;
+      const read = async (): Promise<string> =>
+        (output ??=
+          event.state === "busy" || !event.sessionId
+            ? ""
+            : await this.deps.output(event.sessionId).catch((e: unknown) => {
+                outputError = String(e);
+                return "";
+              }));
       for (const row of this.rows()) {
         if (
           row.targetType === "session"
@@ -257,29 +260,30 @@ export class SessionNotifications {
           event.notify ||
           event.state === "busy" ||
           (row.lastState === "busy" && event.state === "idle");
+        // A dispatched child is finished when it exits, fails, or settles with a
+        // RESULT block that is not a question. A plain idle may be a question the
+        // parent answers, and the child's next turn must still reach it.
+        const finished =
+          row.targetType === "dispatch" &&
+          actionable &&
+          (event.state === "exited" ||
+            event.state === "failed" ||
+            (event.state === "idle" && resultFinishes(await read())));
         if (
           !actionable ||
           !row.states.includes(event.state) ||
           (row.mode === "done" && !["idle", "exited", "failed"].includes(event.state)) ||
           (row.mode === "includes" && event.state === "busy")
         ) {
-          this.advance(row, event, actionable);
+          this.advance(row, event, finished);
           continue;
         }
-        if (output === undefined) {
-          output =
-            event.state === "busy" || !event.sessionId
-              ? ""
-              : await this.deps.output(event.sessionId).catch((e: unknown) => {
-                  outputError = String(e);
-                  return "";
-                });
-        }
+        await read();
         if (
           row.mode === "includes" &&
-          (outputError || !output.toLowerCase().includes(row.responseIncludes!.toLowerCase()))
+          (outputError || !output!.toLowerCase().includes(row.responseIncludes!.toLowerCase()))
         ) {
-          this.advance(row, event, actionable);
+          this.advance(row, event, finished);
           continue;
         }
         const notification: SessionNotification = {
@@ -290,7 +294,7 @@ export class SessionNotifications {
           ...(event.dispatchId ? { dispatchId: event.dispatchId } : {}),
           state: event.state,
           at: Date.now(),
-          output: event.error ?? extractResultBlock(output) ?? output.slice(-6000),
+          output: event.error ?? extractResultBlock(output!) ?? output!.slice(-6000),
           ...(outputError ? { outputError } : {}),
           delivered: false,
         };
@@ -301,7 +305,7 @@ export class SessionNotifications {
               "INSERT INTO notifications (id, subscription_id, subscriber, body) VALUES (?, ?, ?, ?)",
             )
             .run(notification.id, row.id, row.subscriber, JSON.stringify(notification));
-          this.advance(row, event, actionable);
+          this.advance(row, event, finished);
           this.db.exec("COMMIT");
         } catch (e) {
           this.db.exec("ROLLBACK");
@@ -355,6 +359,11 @@ export class SessionNotifications {
   close(): Promise<void> {
     return this.serial(() => this.db.close());
   }
+}
+
+function resultFinishes(output: string): boolean {
+  const block = extractResultBlock(output);
+  return block !== null && !/^status:\s*question\b/im.test(block);
 }
 
 const instances = new Map<string, SessionNotifications>();

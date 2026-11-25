@@ -223,8 +223,33 @@ describe("durable session notifications", () => {
     expect((await store.inbox("parent"))[0]!.state).toBe("exited");
   });
 
+  it("keeps a dispatch watch across a question turn until the child posts its RESULT", async () => {
+    const { store, deliver, output } = make();
+    await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+    output.mockResolvedValueOnce("Should I use Postgres or SQLite?");
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    expect(deliver).toHaveBeenCalledTimes(1);
+    // The parent answers; the child's next turn must still reach it.
+    output.mockResolvedValueOnce("RESULT\nstatus: question\nchanged: none");
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    expect(deliver).toHaveBeenCalledTimes(2);
+    output.mockResolvedValueOnce("Done.\nRESULT\nstatus: done\nchanged: a.ts");
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(deliver.mock.calls[2]![1]).toContain("status: done");
+    expect(await store.list("parent")).toEqual([]);
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    await store.publish(event("exited"));
+    expect(deliver).toHaveBeenCalledTimes(3);
+  });
+
   it("ends dispatch alerts after completion while keeping explicit session watches", async () => {
-    const { store, deliver } = make();
+    const { store, deliver, output } = make();
+    output.mockResolvedValue("RESULT\nstatus: done");
     await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
     await store.subscribe({ subscriber: "watcher", targetType: "session", targetId: "child" });
     await store.publish(event("idle", false));
@@ -252,6 +277,7 @@ describe("durable session notifications", () => {
       const path = join(dir, "notifications.sqlite");
       const first = make(path);
       first.deliver.mockRejectedValue(new Error("offline"));
+      first.output.mockResolvedValue("RESULT\nstatus: done");
       await first.store.subscribe({
         subscriber: "parent",
         targetType: "dispatch",
@@ -276,7 +302,8 @@ describe("durable session notifications", () => {
   );
 
   it("retires a completed dispatch even when its final state is filtered out", async () => {
-    const { store, deliver } = make();
+    const { store, deliver, output } = make();
+    output.mockResolvedValue("RESULT\nstatus: blocked");
     await store.subscribe({
       subscriber: "parent",
       targetType: "dispatch",
