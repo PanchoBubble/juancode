@@ -81,7 +81,7 @@ import {
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { defaultChainDeps, sessionChainTokens, watchChains } from "./chains.ts";
-import { chainNotesFor, postChainNote } from "./chain-notes.ts";
+import { chainNotesFor, chainNotesJson, postChainNote } from "./chain-notes.ts";
 import {
   registerNotificationTools,
   notificationSubscriber,
@@ -999,10 +999,16 @@ app.get("/api/chain-notes", async (req: Request, res: Response) => {
   const chain = typeof req.query.chain === "string" ? req.query.chain : undefined;
   const fromSessionId =
     typeof req.query.fromSessionId === "string" ? req.query.fromSessionId : undefined;
+  // text/plain stays the default; ?format=json (or Accept: application/json) opts into JSON.
+  const json = req.query.format === "json" || req.accepts(["text/plain", "json"]) === "json";
   try {
-    res.type("text/plain").send(await chainNotesFor(defaultChainDeps(), { chain, fromSessionId }));
+    const target = { chain, fromSessionId };
+    if (json) res.json(await chainNotesJson(defaultChainDeps(), target));
+    else res.type("text/plain").send(await chainNotesFor(defaultChainDeps(), target));
   } catch (err) {
-    res.status(400).type("text/plain").send(err instanceof Error ? err.message : String(err));
+    const error = err instanceof Error ? err.message : String(err);
+    if (json) res.status(400).json({ ok: false, error });
+    else res.status(400).type("text/plain").send(error);
   }
 });
 

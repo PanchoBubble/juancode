@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeChainDeps } from "./chains-fake.ts";
-import { chainNotesFor, chainNotesPath, postChainNote, readChainNotes } from "./chain-notes.ts";
+import {
+  chainNotesFor,
+  chainNotesJson,
+  chainNotesPath,
+  postChainNote,
+  readChainNotes,
+} from "./chain-notes.ts";
 import type { Chain } from "./native-events.ts";
 
 const chain: Chain = {
@@ -58,6 +64,13 @@ describe("chain notes", () => {
     const text = await chainNotesFor(deps, { chain: chain.id }, undefined, dir);
     expect(text).toContain("ship by friday");
     expect(text).toContain("tests green");
+    const json = await chainNotesJson(deps, { chain: chain.id }, undefined, dir);
+    expect(json).toMatchObject({
+      chain: chain.id,
+      name: "Board access",
+      summary: { text: "ship by friday", kind: "summary" },
+    });
+    expect(json.notes.map((n) => n.text)).toEqual(["tests green"]);
   });
 
   it("refuses a session outside any chain and an id that leaves the directory", async () => {

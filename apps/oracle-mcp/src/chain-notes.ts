@@ -117,6 +117,14 @@ export async function readChainNotes(chainId: string, dir = chainNotesDir()): Pr
   return out;
 }
 
+/** The latest summary and the last `limit` plain notes: what both bodies of GET show. */
+function pickNotes(notes: ChainNote[], limit: number) {
+  return {
+    summary: [...notes].reverse().find((n) => n.kind === "summary") ?? null,
+    tail: notes.filter((n) => n.kind === "note").slice(-limit),
+  };
+}
+
 /** The notes as an agent reads them: the latest summary, then the last `limit` notes. */
 export function chainNotesText(chain: Chain, notes: ChainNote[], limit = 40): string {
   const name = chain.name ?? chain.slug;
@@ -124,8 +132,7 @@ export function chainNotesText(chain: Chain, notes: ChainNote[], limit = 40): st
   const who = (n: ChainNote) =>
     n.author === "you" ? "you" : (n.authorName ?? n.author.slice(0, 8));
   const stamp = (n: ChainNote) => new Date(n.at).toISOString().slice(0, 16).replace("T", " ");
-  const summary = [...notes].reverse().find((n) => n.kind === "summary");
-  const tail = notes.filter((n) => n.kind === "note").slice(-limit);
+  const { summary, tail } = pickNotes(notes, limit);
   const parts = [`Notes on "${name}"`];
   if (summary) parts.push(`Summary (${who(summary)}, ${stamp(summary)}):\n${summary.text}`);
   if (tail.length > 0)
@@ -165,4 +172,16 @@ export async function chainNotesFor(
 ): Promise<string> {
   const { chain } = await resolveNoteChain(deps, target);
   return chainNotesText(chain, await readChainNotes(chainKey(chain), dir), limit);
+}
+
+/** The same notes as JSON, for scripts: {chain, name, summary, notes[]}. */
+export async function chainNotesJson(
+  deps: ChainDeps,
+  target: NoteTarget,
+  limit = 40,
+  dir = chainNotesDir(),
+) {
+  const { chain } = await resolveNoteChain(deps, target);
+  const { summary, tail } = pickNotes(await readChainNotes(chainKey(chain), dir), limit);
+  return { chain: chainKey(chain), name: chain.name ?? chain.slug, summary, notes: tail };
 }
