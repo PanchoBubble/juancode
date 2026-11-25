@@ -70,6 +70,8 @@ export interface SessionNotification {
   escalatedFrom?: string;
   /** Set when nobody up the chain was running and the human got it as a handoff. */
   escalatedTo?: "human";
+  /** Seen in the subscriber's transcript after it exited: the queue typed it. */
+  typed?: boolean;
 }
 export interface SessionLiveness {
   running: boolean;
@@ -85,6 +87,9 @@ interface NotificationDeps {
   /** The sessions the idle reaper must not sleep: an orchestrator idles between
    *  child results, and a slept subscriber would push them to the human. */
   protect?: (ids: string[]) => void;
+  /** What the session was typed, to tell a queued result it read from one its
+   *  queue dropped when it exited. Throws when it cannot say. */
+  received?: (id: string) => Promise<string>;
 }
 
 export class SessionNotifications {
@@ -274,6 +279,8 @@ export class SessionNotifications {
                 outputError = String(e);
                 return "";
               }));
+      if (event.sessionId && (event.state === "exited" || event.state === "failed"))
+        await this.recheckAccepted(event.sessionId);
       for (const row of this.rows()) {
         if (
           row.targetType === "session"
@@ -356,6 +363,36 @@ export class SessionNotifications {
       }
       await this.flushPending();
     });
+  }
+  /** The daemon queue accepting a result is not the subscriber reading it: one that
+   *  exits or is slept first loses its queue. Each accepted row is settled once, on
+   *  the first exit that can read the transcript: typed, or pending again so
+   *  flushPending escalates it like any result for a session no longer running. */
+  private async recheckAccepted(subscriber: string): Promise<void> {
+    if (!this.deps.received) return;
+    const items = this.db
+      .prepare("SELECT body FROM notifications WHERE subscriber = ? AND delivered = 1")
+      .all(subscriber)
+      .map((r) => JSON.parse(String(r.body)) as SessionNotification)
+      .filter((item) => !item.escalatedTo && !item.typed);
+    if (!items.length) return;
+    let text: string;
+    try {
+      text = await this.deps.received(subscriber);
+    } catch (e) {
+      console.warn(`session notifications: cannot read ${subscriber}'s transcript:`, e);
+      return;
+    }
+    for (const item of items) {
+      if (text.includes(item.id)) item.typed = true;
+      else {
+        item.delivered = false;
+        item.deliveryError = `Accepted into ${subscriber}'s queue, which ended before typing it`;
+      }
+      this.db
+        .prepare("UPDATE notifications SET body = ?, delivered = ? WHERE id = ?")
+        .run(JSON.stringify(item), item.delivered ? 1 : 0, item.id);
+    }
   }
   private async flushPending(): Promise<void> {
     const rows = this.db
@@ -506,6 +543,12 @@ export function sessionNotifications(): SessionNotifications {
       return out;
     },
     protect: protectFromReaper,
+    // Every record: one result can sit behind any number of later turns.
+    received: async (id) =>
+      (await fetchMessages(id, 0)).messages
+        .filter((m) => m.role === "user")
+        .map((m) => m.text)
+        .join("\n"),
     toHuman: async (item, text) => {
       // The child is the handoff's source; its chain, else the subscriber's.
       const chainSlugOf = (id: string) =>

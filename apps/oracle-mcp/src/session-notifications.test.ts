@@ -540,6 +540,87 @@ describe("durable session notifications", () => {
       expect(toHuman).toHaveBeenCalledTimes(1);
     });
 
+    // juancode-4hi6: the queue accepted the result, then the parent exited or was
+    // slept before typing it; the daemon dropped the queue with the row delivered.
+    describe("accepted into the parent's queue but never typed", () => {
+      function accepting(typed: string[]) {
+        const live = new Map<string, { running: boolean; parent?: string }>([
+          ["parent", { running: true }],
+        ]);
+        const deliver = vi.fn(async (_id: string, _text: string) => {});
+        const toHuman = vi.fn(async (_item: unknown, _text: string) => {});
+        const received = vi.fn(async (_id: string) => typed.join("\n"));
+        const store = new SessionNotifications(":memory:", {
+          output: async () => "The final answer",
+          deliver,
+          sessions: async () => live,
+          toHuman,
+          received,
+        });
+        stores.push(store);
+        return { store, live, deliver, toHuman, received };
+      }
+      const parentExits = { sessionId: "parent", state: "exited", notify: true } as const;
+
+      it("escalates the untyped result exactly once when the parent exits", async () => {
+        const { store, live, deliver, toHuman, received } = accepting([]);
+        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.publish(event("exited"));
+        expect(deliver).toHaveBeenCalledTimes(1);
+        live.set("parent", { running: false });
+        await store.publish(parentExits);
+        // The exit frame and the reconnect snapshot both replay the parent's exit.
+        await store.publish(parentExits);
+        await store.retry();
+        expect(toHuman).toHaveBeenCalledTimes(1);
+        expect(toHuman.mock.calls[0]![1]).toContain("The final answer");
+        expect(received).toHaveBeenCalledTimes(1);
+        expect(await store.inbox("parent")).toMatchObject([
+          { delivered: true, escalatedTo: "human" },
+        ]);
+      });
+
+      it("leaves a result the parent did type alone, and asks only once", async () => {
+        const { store, live, deliver, toHuman, received } = accepting([]);
+        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.publish(event("exited"));
+        const typed = deliver.mock.calls[0]![1];
+        received.mockResolvedValue(`some prompt\n${typed}`);
+        live.set("parent", { running: false });
+        await store.publish(parentExits);
+        await store.publish(parentExits);
+        expect(toHuman).not.toHaveBeenCalled();
+        expect(deliver).toHaveBeenCalledTimes(1);
+        expect(received).toHaveBeenCalledTimes(1);
+      });
+
+      it("hands an untyped result to a running ancestor instead", async () => {
+        const { store, live, deliver, toHuman } = accepting([]);
+        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.publish(event("exited"));
+        live.set("parent", { running: false, parent: "grandparent" });
+        live.set("grandparent", { running: true });
+        await store.publish(parentExits);
+        expect(toHuman).not.toHaveBeenCalled();
+        expect(deliver.mock.calls.map((c) => c[0])).toEqual(["parent", "grandparent"]);
+        expect(await store.inbox("grandparent")).toMatchObject([
+          { escalatedFrom: "parent", delivered: true },
+        ]);
+      });
+
+      it("escalates nothing, and checks again later, while the transcript cannot be read", async () => {
+        const { store, live, toHuman, received } = accepting([]);
+        await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+        await store.publish(event("exited"));
+        live.set("parent", { running: false });
+        received.mockRejectedValueOnce(new Error("app down"));
+        await store.publish(parentExits);
+        expect(toHuman).not.toHaveBeenCalled();
+        await store.publish(parentExits);
+        expect(toHuman).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it("escalates nothing while the core cannot list sessions", async () => {
       const { store, deliver, toHuman, sessions } = escalating({});
       sessions.mockRejectedValue(new Error("app down"));
