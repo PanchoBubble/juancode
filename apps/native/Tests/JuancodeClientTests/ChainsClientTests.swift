@@ -1,8 +1,9 @@
+import Foundation
 import Hummingbird
 import HummingbirdTesting
 import HummingbirdWebSocket
 import JuancodeCore
-import XCTest
+import Testing
 
 @testable import JuancodeClient
 
@@ -13,39 +14,39 @@ import XCTest
 /// way `juancoded` does — a `chainResult` to the asker, then the chain whole on the
 /// change stream — because what goes wrong with a surface like this is a frame that
 /// never went out or an answer read as somebody else's.
-final class ChainsClientTests: XCTestCase {
+@Suite struct ChainsClientTests {
 
     // MARK: - The book
 
-    func testTheBookConvergesWhateverOrderTheWholeFramesArriveIn() {
+    @Test func theBookConvergesWhateverOrderTheWholeFramesArriveIn() {
         var book = ChainBook()
         let a = Chain(slug: "a", members: [ChainMember(kind: .session, ref: "s-1")])
         book.upsert(a)
         // The snapshot arriving after a change it already includes changes nothing.
         book.replace(with: [a, Chain(slug: "b")])
         book.upsert(a)
-        XCTAssertEqual(book.chains.map(\.slug), ["a", "b"])
-        XCTAssertEqual(book.chain(forSession: "s-1")?.slug, "a")
+        #expect(book.chains.map(\.slug) == ["a", "b"])
+        #expect(book.chain(forSession: "s-1")?.slug == "a")
 
         // A move is two whole chains, and the book follows the last one for each slug.
         book.upsert(Chain(slug: "b", members: [ChainMember(kind: .session, ref: "s-1")]))
         book.upsert(Chain(slug: "a"))
-        XCTAssertEqual(book.chain(forSession: "s-1")?.slug, "b")
-        XCTAssertNil(book.chain(of: .beads, ref: "s-1"), "a ref is only itself under its kind")
+        #expect(book.chain(forSession: "s-1")?.slug == "b")
+        #expect(book.chain(of: .beads, ref: "s-1") == nil, "a ref is only itself under its kind")
 
         book.upsert(Chain(slug: "a", state: .inactive, closedAt: 5))
-        XCTAssertEqual(book.active.map(\.slug), ["b"])
+        #expect(book.active.map(\.slug) == ["b"])
         book.remove(slug: "b")
-        XCTAssertNil(book.chain(forSession: "s-1"))
-        XCTAssertNil(book["b"])
+        #expect(book.chain(forSession: "s-1") == nil)
+        #expect(book["b"] == nil)
     }
 
     // MARK: - The frames
 
-    func testWritesGoOutCorrelatedAndTheBookFollowsTheChangeStream() async throws {
+    @Test func writesGoOutCorrelatedAndTheBookFollowsTheChangeStream() async throws {
         let daemon = ChainDaemon()
         try await withChainDaemon(daemon) { core in
-            XCTAssertTrue(core.supports(.chains))
+            #expect(core.supports(.chains))
             let log = BookLog()
             let cancel = core.subscribeChains { log.record($0) }
             try await log.settle { $0.chains.map(\.slug) == ["existing"] }
@@ -59,62 +60,62 @@ final class ChainsClientTests: XCTestCase {
 
             do {
                 try await core.createChain("existing")
-                XCTFail("a refusal must throw")
+                Issue.record("a refusal must throw")
             } catch let error as ChainError {
-                XCTAssertEqual(error.code, "chain-exists")
+                #expect(error.code == "chain-exists")
             }
 
             try await core.deleteChain("auth-rewrite")
             try await log.settle { $0["auth-rewrite"] == nil }
 
-            let member = try XCTUnwrap(daemon.frames(ofType: "setChainMember").first)
-            XCTAssertEqual(member["kind"] as? String, "session")
-            XCTAssertEqual(member["ref"] as? String, "s-1")
-            XCTAssertEqual(member["slug"] as? String, "auth-rewrite")
-            XCTAssertNotNil(member["requestId"] as? String)
-            XCTAssertEqual(daemon.frames(ofType: "subscribeChains").count, 1)
+            let member = try #require(daemon.frames(ofType: "setChainMember").first)
+            #expect(member["kind"] as? String == "session")
+            #expect(member["ref"] as? String == "s-1")
+            #expect(member["slug"] as? String == "auth-rewrite")
+            #expect(member["requestId"] as? String != nil)
+            #expect(daemon.frames(ofType: "subscribeChains").count == 1)
             cancel()
         }
     }
 
     /// An answer is confirmed by the core's `handoffResult`; a refusal throws, so the
     /// inbox can show it instead of leaving the question standing with no word.
-    func testClosingAHandoffAwaitsTheCoresResult() async throws {
+    @Test func closingAHandoffAwaitsTheCoresResult() async throws {
         let daemon = ChainDaemon()
         try await withChainDaemon(daemon) { core in
             try await core.closeHandoff("h-open", reason: "Option B")
             do {
                 try await core.closeHandoff("h-closed", reason: "Option A")
-                XCTFail("a refusal must throw")
+                Issue.record("a refusal must throw")
             } catch let error as ChainError {
-                XCTAssertEqual(error.code, "handoff-closed")
+                #expect(error.code == "handoff-closed")
             }
             let sent = daemon.frames(ofType: "closeHandoff")
-            XCTAssertEqual(sent.first?["closureReason"] as? String, "Option B")
-            XCTAssertNotNil(sent.first?["requestId"] as? String)
+            #expect(sent.first?["closureReason"] as? String == "Option B")
+            #expect(sent.first?["requestId"] as? String != nil)
         }
     }
 
     /// A core that keeps no chains is sent nothing, hands a watcher an empty book, and
     /// refuses every write by name rather than pretending it landed.
-    func testACoreWithoutTheCapabilityIsSentNothing() async throws {
+    @Test func aCoreWithoutTheCapabilityIsSentNothing() async throws {
         let daemon = ChainDaemon()
         daemon.capabilities = ["inputAck", "resizeAck", "screen"]
         try await withChainDaemon(daemon) { core in
-            XCTAssertFalse(core.supports(.chains))
-            XCTAssertNotNil(core.unavailableReason(.chains))
+            #expect(!core.supports(.chains))
+            #expect(core.unavailableReason(.chains) != nil)
             let log = BookLog()
             _ = core.subscribeChains { log.record($0) }
-            XCTAssertEqual(log.books.count, 1)
-            XCTAssertTrue(try XCTUnwrap(log.books.first).isEmpty)
+            #expect(log.books.count == 1)
+            #expect(try #require(log.books.first).isEmpty)
             do {
                 try await core.createChain("a")
-                XCTFail("must refuse")
+                Issue.record("must refuse")
             } catch let error as ChainError {
-                XCTAssertEqual(error.code, "chain-unavailable")
+                #expect(error.code == "chain-unavailable")
             }
             await Nap.duration(.milliseconds(200))
-            XCTAssertTrue(daemon.chainFrames.isEmpty)
+            #expect(daemon.chainFrames.isEmpty)
         }
     }
 }
@@ -207,7 +208,7 @@ private final class BookLog: @unchecked Sendable {
             if let last = books.last, done(last) { return }
             await Nap.duration(.milliseconds(30))
         }
-        XCTFail("the book never settled: \(books.last.map { $0.chains.map(\.slug) } ?? [])")
+        Issue.record("the book never settled: \(books.last.map { $0.chains.map(\.slug) } ?? [])")
     }
 }
 
@@ -249,7 +250,7 @@ private func withChainDaemon(
         }
     }
     try await makeChainApplication(daemon).test(.live) { client in
-        let port = try XCTUnwrap(client.port)
+        let port = try #require(client.port)
         let core = try await Task.detached {
             try RustCoreClient.connect(baseURL: "http://localhost:\(port)",
                                        mirrorPath: mirrorPath, timeout: 5)
