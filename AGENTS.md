@@ -113,6 +113,8 @@ applies to dispatched/background agent sessions. This is the repo's opt-in to th
 Beads "team-maintainer" profile below: close beads, run the gates, commit, `bd dolt push`
 and push as part of finishing.
 
+Orchestrated plan/implement/test chains follow `.claude/skills/run-loop/SKILL.md`.
+
 ## Run it locally
 
 - Native app: `cd apps/native && swift run juancode-app` (embedded server on `:4280`).
