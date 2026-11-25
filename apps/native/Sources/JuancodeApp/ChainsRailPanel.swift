@@ -16,6 +16,13 @@ struct ChainsRailPanel: View {
         let inactive = model.chains.inactive
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
+                if model.supportsChains {
+                    Button("Start Loop…", systemImage: "arrow.triangle.2.circlepath") { model.startLoop() }
+                        .buttonStyle(.borderless).font(.system(size: 11))
+                        .padding(.horizontal, 12).padding(.vertical, 4)
+                        .help("Start an orchestrator on a goal; it gets its own chain")
+                        .clickCursor()
+                }
                 if !model.supportsChains {
                     note("This core doesn't keep chains.")
                 } else if active.isEmpty {

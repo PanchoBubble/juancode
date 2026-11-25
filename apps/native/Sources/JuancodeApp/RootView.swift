@@ -140,6 +140,7 @@ private struct WindowContent: View {
         .sheet(isPresented: $model.showingCompressVideo) {
             CompressVideoSheet()
         }
+        .sheet(item: $model.startLoopSeed) { StartLoopSheet(seed: $0) }
         .sheet(isPresented: $model.showingStatus) {
             StatusPanel()
         }

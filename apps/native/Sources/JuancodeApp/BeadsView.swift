@@ -559,6 +559,7 @@ private struct BeadsCard: View {
         .contextMenu {
             if !issue.isClosed {
                 Button("Work on \(issue.id)") { model.workOnIssue(issue, cwd: cwd) }
+                Button("Start Loop on \(issue.id)…") { model.startLoop(epic: issue, cwd: cwd) }
             }
             Button("Copy id") { copy(issue.id) }
         }
@@ -650,6 +651,9 @@ private struct BeadsTicketView: View {
                 if let summary, !summary.isClosed {
                     Button("Work on it") { model.workOnIssue(summary, cwd: cwd) }
                         .help("Send this ticket to the project's focused session, or start one")
+                        .clickCursor()
+                    Button("Start Loop…") { model.startLoop(epic: summary, cwd: cwd) }
+                        .help("Start an orchestrator that drives this ticket's children to closed")
                         .clickCursor()
                 }
                 Button("Copy id") { copy(d.id) }.clickCursor()

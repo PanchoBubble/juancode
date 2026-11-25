@@ -455,6 +455,8 @@ final class AppModel {
     var showingKillPort = false
     /// Controls the Compress Video utility sheet — shrink a screen recording for Slack.
     var showingCompressVideo = false
+    /// The open Start Loop sheet (juancode-8oa5.13), nil when closed.
+    var startLoopSeed: StartLoopSeed?
     /// Auth & MCP status sheet — lifted off the sidebar toolbar into the top-bar
     /// Tools popover (juancode-tciz), so it lives on the model rather than local
     /// sidebar @State.

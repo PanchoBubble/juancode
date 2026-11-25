@@ -422,6 +422,7 @@ struct JuancodeApp: App {
                     performShortcut(.sessionTemplates, model: model, oracle: oracle)
                 }
                 .appShortcut(.sessionTemplates, shortcuts)
+                Button("Start Loop…") { model.startLoop() }
             }
             CommandGroup(after: .toolbar) {
                 // ⌘⇧ + a panel's letter reveals that panel and gives it the keyboard
