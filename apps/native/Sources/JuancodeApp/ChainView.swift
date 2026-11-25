@@ -165,6 +165,7 @@ struct ChainOverviewView: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.08)))
 
             ChainQuestionsInbox(slug: chain.slug)
+            ChainHandoffsPanel(chain: chain)
 
             if mode == .graph && !chain.members.isEmpty {
                 ChainGraphView(chain: chain, query: query)
@@ -634,5 +635,114 @@ private struct ChainQuestionCard: View {
     private func send() {
         model.answerQuestion(question, draft)
         draft = ""
+    }
+}
+
+/// The chain's handoffs other than questions (juancode-043.3): the open ones as next
+/// actions, most urgent first, each with its owner, issue, summary and evidence and a
+/// click through to the owner; the closed ones folded away as history.
+struct ChainHandoffsPanel: View {
+    @Environment(AppModel.self) private var model
+    let chain: Chain
+    @State private var showHistory = false
+
+    var body: some View {
+        let all = model.chainHandoffs.handoffs(in: chain.slug).filter { !$0.isQuestion }
+        let open = all.filter(\.isOpen)
+            .map { ($0, standing($0)) }
+            .sorted { $0.1 < $1.1 }
+        let closed = all.filter { !$0.isOpen }.reversed()
+        if !all.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                if !open.isEmpty {
+                    Text("NEXT ACTIONS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(open, id: \.0.id) { handoff, standing in
+                                row(handoff, standing: standing)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 180)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                if !closed.isEmpty {
+                    DisclosureGroup("History · \(closed.count) closed", isExpanded: $showHistory) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(closed)) { row($0, standing: nil) }
+                        }
+                    }
+                    .font(.caption)
+                }
+            }
+        }
+    }
+
+    private func standing(_ h: ChainHandoff) -> ChainHandoffStanding {
+        let id = h.target.sessionId
+        return h.standing(owner: id.flatMap { id in model.sessions.first { $0.id == id } },
+                          activity: id.flatMap(model.activity))
+    }
+
+    private func name(_ owner: ChainHandoffOwner) -> String {
+        guard let id = owner.sessionId else { return "You" }
+        return model.sessions.first { $0.id == id }?.title ?? "A removed session"
+    }
+
+    private func tint(_ s: ChainHandoffStanding?) -> Color {
+        switch s {
+        case .needsYou?, .stalled?: return .orange
+        case .working?: return .blue
+        case .unknown?, .onHold?, .gone?, nil: return .secondary
+        }
+    }
+
+    /// Open the handoff's owner: its member tab, or the session itself outside the chain.
+    private func openOwner(_ h: ChainHandoff) {
+        guard let id = h.target.sessionId else { return }
+        let ref = ChainMemberRef(kind: .session, ref: id)
+        if chain.contains(ref) {
+            model.selectChainMember(ref)
+        } else if model.sessions.contains(where: { $0.id == id }) {
+            model.selection = id
+        }
+    }
+
+    private func row(_ h: ChainHandoff, standing: ChainHandoffStanding?) -> some View {
+        let opens = h.target.sessionId.map { id in model.sessions.contains { $0.id == id } } ?? false
+        return Button { openOwner(h) } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Text(standing?.title ?? "Closed")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(tint(standing))
+                    .frame(width: 70, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text("\(name(h.source)) → \(name(h.target))").lineLimit(1)
+                        if h.state == .acknowledged { Text("· acknowledged") }
+                        if let issue = h.beadsIssue { Text("· \(issue)") }
+                        Text("· \(relativeTime(h.updatedAt))")
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    Text(h.summary).font(.callout).lineLimit(2).truncationMode(.tail)
+                    if let reason = h.closureReason, !reason.isEmpty {
+                        Text("Closed: \(reason)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    if let evidence = h.evidenceRef {
+                        Text("Evidence: \(evidence)").font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(1).textSelection(.enabled)
+                    }
+                }
+                Spacer(minLength: 4)
+                if opens { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary) }
+            }
+            .padding(.horizontal, 9).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.04)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!opens)
+        .help(opens ? "Open \(name(h.target))" : h.summary)
+        .accessibilityLabel("\(standing?.title ?? "Closed") handoff from \(name(h.source)) to \(name(h.target)): \(h.summary)")
     }
 }

@@ -18,6 +18,8 @@ export interface SessionSummary {
   updatedAt: number;
   /** The CLI's own session id (Claude Code's `CLAUDE_CODE_SESSION_ID`), when known. */
   cliSessionId?: string;
+  /** Put to sleep (resumable); present only when true. */
+  dormant?: boolean;
 }
 
 /** Live activity as broadcast on the native WS (`activity` messages). */
@@ -30,9 +32,7 @@ export type NotifyKind = "needs_input" | "finished";
 
 /** Parse the untyped /api/sessions payload into summaries, dropping malformed rows. */
 export function parseSessionList(raw: unknown): SessionSummary[] {
-  const list = Array.isArray(raw)
-    ? raw
-    : ((raw as { sessions?: unknown[] })?.sessions ?? []);
+  const list = Array.isArray(raw) ? raw : ((raw as { sessions?: unknown[] })?.sessions ?? []);
   if (!Array.isArray(list)) return [];
   const out: SessionSummary[] = [];
   for (const item of list) {
@@ -50,6 +50,7 @@ export function parseSessionList(raw: unknown): SessionSummary[] {
       ...(typeof r.cliSessionId === "string" && r.cliSessionId
         ? { cliSessionId: r.cliSessionId }
         : {}),
+      ...(r.dormant === true ? { dormant: true } : {}),
     });
   }
   return out;
@@ -187,10 +188,7 @@ export function resolveSelector(
  * confirmation that the queued work really started; ordinary WS-acked dispatches
  * already reported synchronously. Returns null when nothing should be sent.
  */
-export function dispatchResultText(
-  r: DispatchResultRecord,
-  wasQueuedHere: boolean,
-): string | null {
+export function dispatchResultText(r: DispatchResultRecord, wasQueuedHere: boolean): string | null {
   const proj = projectName(r.project);
   if (!r.ok) return `⚠️ Dispatch into ${proj} failed: ${r.error ?? "unknown error"}`;
   if (!wasQueuedHere) return null;

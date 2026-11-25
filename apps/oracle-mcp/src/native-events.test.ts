@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import {
   ScreenMirror,
   applyChainFrame,
+  applyHandoffFrame,
   chainForSession,
   chains,
   createChain,
@@ -696,6 +697,8 @@ describe("chains over the shared native WS", () => {
     await until(() => received.some((m) => m.type === "subscribeChains"));
     expect(subscribeChains()).toBe(true);
     expect(received.filter((m) => m.type === "subscribeChains")).toHaveLength(1);
+    // A daemon without `chainHandoffs` is never asked for them.
+    expect(received.some((m) => m.type === "subscribeHandoffs")).toBe(false);
 
     server!.send(JSON.stringify({ type: "chains", chains: [] }));
     await until(() => chains() !== null);
@@ -741,6 +744,38 @@ describe("chains over the shared native WS", () => {
     server!.send(JSON.stringify({ type: "chainRemoved", slug: "auth" }));
     await until(() => chainForSession("s-1") === null);
     expect(seen.at(-1)).toEqual([]);
+  });
+});
+
+describe("applyHandoffFrame", () => {
+  const record = (id: string, state = "pending") => ({
+    id,
+    chainSlug: "auth",
+    source: { kind: "session", sessionId: "s-1" },
+    target: { kind: "human" },
+    summary: "Pick one",
+    createdAt: 1,
+    updatedAt: 1,
+    state,
+    delivery: "sent",
+  });
+
+  it("replaces on the whole history, upserts one record, and drops malformed ones", () => {
+    let book = applyHandoffFrame(null, {
+      type: "handoffs",
+      handoffs: [record("h1"), { id: "bad", target: { kind: "robot" } }],
+    });
+    expect(book?.map((h) => h.id)).toEqual(["h1"]);
+    book = applyHandoffFrame(book, { type: "handoff", handoff: record("h2") });
+    book = applyHandoffFrame(book, {
+      type: "handoff",
+      handoff: { ...record("h1", "closed"), closureReason: "yes" },
+    });
+    expect(book?.map((h) => [h.id, h.state, h.closureReason])).toEqual([
+      ["h1", "closed", "yes"],
+      ["h2", "pending", undefined],
+    ]);
+    expect(applyHandoffFrame(book, { type: "chains", chains: [] })).toBeNull();
   });
 });
 

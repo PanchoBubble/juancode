@@ -72,7 +72,7 @@ export function registerChainTools(
     {
       title: "Show one chain",
       description:
-        "Everything in one chain, grouped by kind: its sessions with project, provider and live status (working, waiting for input, idle, exited), its PRs, beads issues and Linear tickets. Use for 'what's going on in <chain>'.",
+        "Everything in one chain, grouped by kind: its sessions with project, provider and live status (working, waiting for input, idle, exited), its PRs, beads issues and Linear tickets; then its open handoffs as next actions (owner, issue, summary, evidence, and whether the owner is working, stalled, on hold or unknown) and how many are closed. Use for 'what's going on in <chain>'.",
       inputSchema: { slug },
     },
     answer((args) => chainShowText(deps(), args.slug)),

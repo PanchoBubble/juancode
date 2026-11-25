@@ -856,6 +856,8 @@ export function subscribeChains(): boolean {
   if (chainsSubscribed) return true;
   chainsSubscribed = true;
   sendToNative({ type: "subscribeChains" });
+  // The handoffs ride along: whoever reads a chain reads its handoffs (juancode-043.3).
+  if (supportsHandoffs()) sendToNative({ type: "subscribeHandoffs" });
   return true;
 }
 
@@ -1015,6 +1017,86 @@ function settleHandoffWrite(msg: Record<string, unknown>): void {
   if (typeof msg.id === "string") result.id = msg.id;
   if (typeof msg.error === "string") result.error = msg.error;
   settle(result);
+}
+
+/** A handoff record as the daemon sends it in its `handoffs` / `handoff` frames. */
+export interface Handoff {
+  id: string;
+  chainSlug: string;
+  source: HandoffOwner;
+  target: HandoffOwner;
+  beadsIssue?: string;
+  summary: string;
+  createdAt: number;
+  updatedAt: number;
+  state: "pending" | "acknowledged" | "closed";
+  closureReason?: string;
+  evidenceRef?: string;
+}
+
+/** The handoff history as the endpoint last sent it, or null before it has (or on a
+ *  daemon without `chainHandoffs`). Subscribed together with the chains. */
+let handoffBook: Handoff[] | null = null;
+
+/** The handoff history the endpoint last sent, or null before it has sent one. */
+export function handoffs(): Handoff[] | null {
+  return handoffBook;
+}
+
+function parseOwner(raw: unknown): HandoffOwner | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  if (o.kind === "human") return { kind: "human" };
+  if (o.kind === "session" && typeof o.sessionId === "string") {
+    return { kind: "session", sessionId: o.sessionId };
+  }
+  return null;
+}
+
+function parseHandoff(raw: unknown): Handoff | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const source = parseOwner(r.source);
+  const target = parseOwner(r.target);
+  if (typeof r.id !== "string" || typeof r.chainSlug !== "string" || !source || !target) {
+    return null;
+  }
+  const state = r.state === "acknowledged" || r.state === "closed" ? r.state : "pending";
+  return {
+    id: r.id,
+    chainSlug: r.chainSlug,
+    source,
+    target,
+    summary: typeof r.summary === "string" ? r.summary : "",
+    createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
+    updatedAt: typeof r.updatedAt === "number" ? r.updatedAt : 0,
+    state,
+    ...(typeof r.beadsIssue === "string" ? { beadsIssue: r.beadsIssue } : {}),
+    ...(typeof r.closureReason === "string" ? { closureReason: r.closureReason } : {}),
+    ...(typeof r.evidenceRef === "string" ? { evidenceRef: r.evidenceRef } : {}),
+  };
+}
+
+/** Apply one `handoffs` (whole history) or `handoff` (one record) frame. Pure; null
+ *  when the frame is neither. Every frame is whole, so re-applying one is a no-op. */
+export function applyHandoffFrame(
+  book: Handoff[] | null,
+  msg: Record<string, unknown>,
+): Handoff[] | null {
+  if (msg.type === "handoffs") {
+    if (!Array.isArray(msg.handoffs)) return null;
+    return msg.handoffs.map(parseHandoff).filter((h): h is Handoff => h !== null);
+  }
+  if (msg.type === "handoff") {
+    const h = parseHandoff(msg.handoff);
+    if (!h) return null;
+    const next = [...(book ?? [])];
+    const at = next.findIndex((x) => x.id === h.id);
+    if (at >= 0) next[at] = h;
+    else next.push(h);
+    return next;
+  }
+  return null;
 }
 
 function parseChainMember(raw: unknown): ChainMember | null {
@@ -1186,6 +1268,7 @@ function connect(): void {
     // coming — unconfirmed is not done.
     chainBook = null;
     chainsSubscribed = false;
+    handoffBook = null;
     for (const settle of chainWrites.values()) {
       settle({ ok: false, op: "", error: "chain-connection-lost" });
     }
@@ -1235,6 +1318,10 @@ function handleMessage(raw: string): void {
   }
   if (msg.type === "handoffResult") {
     settleHandoffWrite(msg);
+    return;
+  }
+  if (msg.type === "handoffs" || msg.type === "handoff") {
+    handoffBook = applyHandoffFrame(handoffBook, msg) ?? handoffBook;
     return;
   }
   if (msg.type === "chains" || msg.type === "chain" || msg.type === "chainRemoved") {

@@ -3,7 +3,7 @@
 // in chains.ts and telegram.ts are exercised against the rules, not against stubs.
 
 import type { ChainDeps } from "./chains.ts";
-import type { Chain, ChainResult } from "./native-events.ts";
+import type { Chain, ChainResult, Handoff } from "./native-events.ts";
 import type { LiveActivity, SessionSummary } from "./telegram-format.ts";
 
 export interface FakeChainDeps extends ChainDeps {
@@ -16,11 +16,14 @@ export function fakeChainDeps({
   sessions = [] as SessionSummary[],
   activity = {} as Record<string, LiveActivity>,
   supported = true,
+  handoffs,
 }: {
   book?: Chain[];
   sessions?: SessionSummary[];
   activity?: Record<string, LiveActivity>;
   supported?: boolean;
+  /** The daemon's handoff history; omitted plays a daemon without handoffs. */
+  handoffs?: Handoff[];
 } = {}): FakeChainDeps {
   let chains = book.map((c) => ({ ...c, members: [...c.members] }));
   const writes: Record<string, unknown>[] = [];
@@ -86,5 +89,6 @@ export function fakeChainDeps({
     },
     sessions: async () => sessions,
     activity: (id) => activity[id],
+    ...(handoffs ? { handoffs: () => handoffs } : {}),
   };
 }

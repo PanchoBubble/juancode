@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerChainTools } from "./chain-tools.ts";
 import { chainListText, membersByKind, readBook, resolveMemberRef } from "./chains.ts";
 import { fakeChainDeps, type FakeChainDeps } from "./chains-fake.ts";
-import type { Chain } from "./native-events.ts";
+import type { Chain, Handoff } from "./native-events.ts";
 import type { SessionSummary } from "./telegram-format.ts";
 
 const session = (id: string, title: string, status = "running"): SessionSummary => ({
@@ -111,6 +111,59 @@ describe("chain MCP tools", () => {
         "Beads issues (1):\n- juancode-dbo.10 · chain tools",
         "Linear tickets (1):\n- ENG-7\n    https://linear.app/x/ENG-7",
       ].join("\n\n"),
+    );
+  });
+
+  it("chain_show lists open handoffs as next actions, stalled only when the owner is known idle", async () => {
+    const h = (id: string, target: Handoff["target"], extra: Partial<Handoff> = {}): Handoff => ({
+      id,
+      chainSlug: "auth-rewrite",
+      source: { kind: "session", sessionId: "2222-bbbb" },
+      target,
+      summary: `do ${id}\nmore detail`,
+      createdAt: Number(id.slice(1)),
+      updatedAt: 1,
+      state: "pending",
+      ...extra,
+    });
+    const to = (sessionId: string) => ({ kind: "session" as const, sessionId });
+    const deps = fakeChainDeps({
+      book: BOOK,
+      sessions: [...SESSIONS, { ...session("4444-eeee", "asleep"), dormant: true }],
+      activity: { "1111-aaaa": "idle", "2222-cccc": "busy" },
+      handoffs: [
+        h("h1", to("1111-aaaa"), { beadsIssue: "juancode-043.3", evidenceRef: "abc123" }),
+        h("h2", to("2222-cccc"), { state: "acknowledged" }),
+        h("h3", to("2222-bbbb")),
+        h("h4", to("4444-eeee")),
+        h("h5", to("3333-dddd")),
+        h("h6", to("gone-0000")),
+        h("h7", { kind: "human" }),
+        h("h8", to("1111-aaaa"), { state: "closed", closureReason: "done" }),
+        { ...h("h9", to("1111-aaaa")), chainSlug: "billing" },
+      ],
+    });
+    const { text } = await (await connect(deps))("chain_show", { slug: "auth-rewrite" });
+    expect(text.split("\n\n").at(-1)).toBe(
+      [
+        "Next actions (7):",
+        "- 🟠 stalled · web → api · juancode-043.3",
+        "    do h1",
+        "    evidence: abc123",
+        "- 🔵 working · web → oracle · acknowledged",
+        "    do h2",
+        "- ❔ unknown · web → web",
+        "    do h3",
+        "- 💤 on hold · web → asleep",
+        "    do h4",
+        "- 🟠 stalled · web → old",
+        "    do h5",
+        "- ⚫ owner gone · web → gone-0000",
+        "    do h6",
+        "- ❗ needs you · web → you",
+        "    do h7",
+        "1 closed handoff in history.",
+      ].join("\n"),
     );
   });
 

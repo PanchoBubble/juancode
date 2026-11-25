@@ -12,6 +12,7 @@ import {
   chains,
   closeChain,
   createChain,
+  handoffs,
   onChains,
   sessionActivity,
   setChainMember,
@@ -21,6 +22,7 @@ import {
   type ChainMember,
   type ChainMemberKind,
   type ChainResult,
+  type Handoff,
 } from "./native-events.ts";
 import { listSessions } from "./oracle.ts";
 import {
@@ -52,6 +54,9 @@ export interface ChainDeps {
   }) => Promise<ChainResult>;
   sessions: () => Promise<SessionSummary[]>;
   activity: (sessionId: string) => LiveActivity | undefined;
+  /** The daemon's handoff history; null before it has sent one or on a daemon
+   *  without handoffs. Absent means the same. */
+  handoffs?: () => Handoff[] | null;
   /** How long to wait for the handshake and the first book. */
   waitMs?: number;
 }
@@ -78,6 +83,7 @@ export function defaultChainDeps(): ChainDeps {
     setMember: setChainMember,
     sessions: async () => parseSessionList(await listSessions()),
     activity: sessionActivity,
+    handoffs,
   };
 }
 
@@ -210,7 +216,8 @@ export async function chainShowText(deps: ChainDeps, slug: string): Promise<stri
   const chain = (await readBook(deps)).find((c) => c.slug === slug);
   if (!chain) throw new Error(`No chain named "${slug}".`);
   const sessions = new Map<string, SessionSummary>();
-  if (chain.members.some((m) => m.kind === "session")) {
+  const chainHandoffs = deps.handoffs?.()?.some((h) => h.chainSlug === slug) ?? false;
+  if (chainHandoffs || chain.members.some((m) => m.kind === "session")) {
     for (const s of await deps.sessions().catch(() => [])) sessions.set(s.id, s);
   }
   const head =
@@ -222,7 +229,77 @@ export async function chainShowText(deps: ChainDeps, slug: string): Promise<stri
       `${KIND_LABELS[kind]} (${members.length}):\n` +
       members.map((m) => memberLine(m, sessions, deps)).join("\n"),
   );
-  return [head, ...(groups.length > 0 ? groups : ["No members yet."])].join("\n\n");
+  const handoffText = handoffSection(chain.slug, sessions, deps);
+  return [
+    head,
+    ...(groups.length > 0 ? groups : ["No members yet."]),
+    ...(handoffText ? [handoffText] : []),
+  ].join("\n\n");
+}
+
+/** Where an open handoff stands, from what is known about its owner (juancode-043.3).
+ *  `stalled` only when the owner is KNOWN not to be working on it (idle, waiting, or
+ *  exited); a session put to sleep is an intentional hold; no activity heard yet is
+ *  unknown, never stalled. Mirrored by `ChainHandoff.standing` in the native app. */
+export type HandoffStanding = "needs-you" | "working" | "stalled" | "on-hold" | "unknown" | "gone";
+
+export function handoffStanding(
+  h: Handoff,
+  owner: SessionSummary | undefined,
+  activity: LiveActivity | undefined,
+): HandoffStanding {
+  if (h.target.kind === "human") return "needs-you";
+  if (!owner) return "gone";
+  if (owner.dormant) return "on-hold";
+  if (owner.status === "exited") return "stalled";
+  if (activity === "busy") return "working";
+  if (activity === "idle" || activity === "waiting_input") return "stalled";
+  return "unknown";
+}
+
+const STANDING_TEXT: Record<HandoffStanding, string> = {
+  "needs-you": "❗ needs you",
+  working: "🔵 working",
+  stalled: "🟠 stalled",
+  "on-hold": "💤 on hold",
+  unknown: "❔ unknown",
+  gone: "⚫ owner gone",
+};
+
+function ownerText(o: Handoff["source"], sessions: Map<string, SessionSummary>): string {
+  if (o.kind === "human") return "you";
+  return sessions.get(o.sessionId)?.title ?? o.sessionId;
+}
+
+/** The chain's open handoffs (next actions: owner, issue, summary, evidence) and a
+ *  count of closed ones, or null when the daemon has no handoff history to give. */
+function handoffSection(
+  slug: string,
+  sessions: Map<string, SessionSummary>,
+  deps: ChainDeps,
+): string | null {
+  const all = deps.handoffs?.()?.filter((h) => h.chainSlug === slug);
+  if (!all || all.length === 0) return null;
+  const open = all.filter((h) => h.state !== "closed").sort((a, b) => a.createdAt - b.createdAt);
+  const closed = all.length - open.length;
+  const lines = open.map((h) => {
+    const owner = h.target.kind === "session" ? sessions.get(h.target.sessionId) : undefined;
+    const target = h.target.kind === "session" ? deps.activity(h.target.sessionId) : undefined;
+    const standing = STANDING_TEXT[handoffStanding(h, owner, target)];
+    const parts = [
+      `- ${standing} · ${ownerText(h.source, sessions)} → ${ownerText(h.target, sessions)}`,
+      ...(h.state === "acknowledged" ? ["acknowledged"] : []),
+      ...(h.beadsIssue ? [h.beadsIssue] : []),
+    ];
+    const summary = h.summary.split("\n")[0]?.trim();
+    const evidence = h.evidenceRef ? `\n    evidence: ${h.evidenceRef}` : "";
+    return `${parts.join(" · ")}${summary ? `\n    ${summary}` : ""}${evidence}`;
+  });
+  const head =
+    open.length > 0 ? `Next actions (${open.length}):\n${lines.join("\n")}` : "No open handoffs.";
+  return closed > 0
+    ? `${head}\n${closed} closed handoff${closed === 1 ? "" : "s"} in history.`
+    : head;
 }
 
 function isoDate(ms: number): string {

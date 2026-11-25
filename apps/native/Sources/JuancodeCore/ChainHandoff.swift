@@ -193,3 +193,49 @@ public extension ChainHandoff {
         }
     }
 }
+
+/// Where an open handoff stands, from what is known about its owner (juancode-043.3).
+/// Mirrors `handoffStanding` in apps/oracle-mcp/src/chains.ts so the phone and the app
+/// agree. Declared in the order the overview lists them: what needs acting on first.
+public enum ChainHandoffStanding: Int, Sendable, Comparable {
+    /// Owed by the human.
+    case needsYou
+    /// The owner is known not to be working on it: idle, waiting for input, or exited.
+    case stalled
+    /// No activity heard from the owner yet. Never guessed to be stalled.
+    case unknown
+    case working
+    /// The owner was put to sleep: an intentional hold, not an accident.
+    case onHold
+    /// The owner session no longer exists.
+    case gone
+
+    public static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
+
+    public var title: String {
+        switch self {
+        case .needsYou: return "Needs you"
+        case .stalled: return "Stalled"
+        case .unknown: return "Unknown"
+        case .working: return "Working"
+        case .onHold: return "On hold"
+        case .gone: return "Owner gone"
+        }
+    }
+}
+
+public extension ChainHandoff {
+    /// `owner` is the target session's row (nil when it is gone), `activity` its live
+    /// activity (nil when none has been heard). Meaningless for a closed handoff.
+    func standing(owner: SessionMeta?, activity: SessionActivity?) -> ChainHandoffStanding {
+        guard target.sessionId != nil else { return .needsYou }
+        guard let owner else { return .gone }
+        if owner.dormant { return .onHold }
+        if owner.status == .exited { return .stalled }
+        switch activity {
+        case .busy: return .working
+        case .idle, .waitingInput: return .stalled
+        case nil: return .unknown
+        }
+    }
+}
