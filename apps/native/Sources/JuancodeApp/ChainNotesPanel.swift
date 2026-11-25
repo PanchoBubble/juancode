@@ -1,7 +1,7 @@
 import SwiftUI
 import JuancodeCore
 
-// The chain's notes column: the agents' latest summary on top, then the running log
+// The chain's notes panel (under the graph): the agents' latest summary on top, then the running log
 // (your requests and the swarm's notes), and a field to add one. The file belongs to
 // the sidecar (see JuancodeCore/ChainNotes.swift); this view re-reads it while shown.
 

@@ -219,18 +219,15 @@ struct ChainOverviewView: View {
                     .padding(.bottom, 12)
                 }
             }
+            // Notes sit under the graph (juancode-2ilc): questions, graph, notes.
+            if showNotes {
+                Divider()
+                ChainNotesPanel(chain: chain).frame(height: 240)
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.appSurface)
-        .safeAreaInset(edge: .trailing, spacing: 0) {
-            if showNotes {
-                HStack(spacing: 0) {
-                    Divider()
-                    ChainNotesPanel(chain: chain).frame(width: 300)
-                }
-            }
-        }
     }
 }
 
