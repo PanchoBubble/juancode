@@ -413,7 +413,7 @@ struct RightRailPanels: View {
             if t.actionable > 0 { actionable(t.actionable) } else if t.total > 0 { quiet("\(t.total)") }
         case .chains:
             if chainsNeedingYou > 0 { actionable(chainsNeedingYou) }
-            else if !model.chains.active.isEmpty { quiet("\(model.chains.active.count)") }
+            else if !model.chains.activeRoots.isEmpty { quiet("\(model.chains.activeRoots.count)") }
         case .tickets:
             if !ticketsStore.tickets.isEmpty {
                 quiet("\(ticketsStore.tickets.count)\(ticketsStore.hasMore ? "+" : "")")

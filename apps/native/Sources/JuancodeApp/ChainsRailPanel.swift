@@ -201,7 +201,7 @@ extension AppModel {
     /// What in `chain`, or any chain nested under it, is waiting on you: sessions at a
     /// prompt, tracked PRs with an open decision.
     func chainAttention(_ chain: Chain) -> ChainAttention {
-        ChainAttention(chains.subtree(of: chain.slug),
+        ChainAttention(chains.subtree(of: chain.slug, surfaced: false),
                        waiting: { activity($0) == .waitingInput },
                        deciding: { tracked[$0].map { !$0.notifications.isEmpty } ?? false })
     }

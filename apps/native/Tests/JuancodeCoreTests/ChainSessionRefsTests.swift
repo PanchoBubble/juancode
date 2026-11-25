@@ -41,6 +41,15 @@ import Testing
         #expect(split.activeRoots.map(\.slug) == ["live"])
         #expect(split.outline(split.activeRoots).map(\.chain.slug) == ["live", "kid"])
         #expect(split.outline(split.inactive.filter { !split.isNested($0) }).map(\.chain.slug) == ["old"])
+        // juancode-4hd4: the closed parent's attention leaves out that surfaced child (and
+        // its subtree); the child's own row still counts it, and an active parent still does.
+        let all: Set = ["p", "l", "k"]
+        func closedScope(_ slug: String, _ book: ChainBook) -> Int {
+            ChainAttention(book.subtree(of: slug, surfaced: false), waiting: { all.contains($0) }, deciding: { _ in false }).total
+        }
+        #expect(closedScope("old", split) == 1)
+        #expect(closedScope("live", split) == 2)
+        #expect(closedScope("old", ChainBook([chain("old", ["p"]), chain("live", ["l"], parent: "old")])) == 2)
         let cyclic = ChainBook([chain("a", [], parent: "b"), chain("b", [], parent: "a")])
         #expect(cyclic.subtree(of: "a").map(\.slug) == ["a", "b"])
     }

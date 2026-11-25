@@ -140,13 +140,16 @@ public struct ChainBook: Sendable, Equatable {
 
     /// `slug` and every chain nested under it, however deep, parents before their
     /// children (juancode-i38u). A parent cycle ends; an unknown slug gives nothing.
-    public func subtree(of slug: String) -> [Chain] {
+    /// `surfaced: false` leaves out the active children of a closed chain, with what is
+    /// under them: the rail draws those as `activeRoots`, so a closed row must not
+    /// count their attention again (juancode-4hd4).
+    public func subtree(of slug: String, surfaced: Bool = true) -> [Chain] {
         var seen: Set<String> = [], out: [Chain] = [], queue = [slug]
         while !queue.isEmpty {
             let at = queue.removeFirst()
             guard seen.insert(at).inserted, let chain = self[at] else { continue }
             out.append(chain)
-            queue += children(of: at).map(\.slug)
+            queue += children(of: at).filter { surfaced || chain.isActive || !$0.isActive }.map(\.slug)
         }
         return out
     }
