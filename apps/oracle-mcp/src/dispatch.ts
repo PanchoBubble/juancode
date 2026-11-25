@@ -156,14 +156,22 @@ const POLL_ADVICE =
   "Track this dispatchId instead of posting again: GET /api/dispatches/<dispatchId>/wait " +
   "(run in the background; returns when the agent stops) or oracle_dispatch_status.";
 
+/** The text the agent starts with: prompt, role template, RESULT contract. Shared by the
+ *  live create and the mailbox line so a queued child still ends with a RESULT block. */
+function dispatchPrompt(opts: DispatchRequest): string {
+  return [opts.prompt, opts.role && rolePrompt(opts.role), RESULT_CONTRACT]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 /** Append one dispatch line for the native app to tail and spawn an agent from.
  *  The offline fallback — shape MUST match Swift `OracleDispatch`. */
 export async function appendDispatch(opts: DispatchRequest, dispatchId: string): Promise<void> {
   const line =
     JSON.stringify({
       project: opts.project,
-      // The role's template rides in the prompt (the Swift reader sends it verbatim), as on a live create.
-      prompt: opts.role ? `${opts.prompt}\n\n${rolePrompt(opts.role)}` : opts.prompt,
+      // The Swift reader sends the prompt verbatim, so it carries everything a live create sends.
+      prompt: dispatchPrompt(opts),
       provider: opts.provider ?? "claude",
       ...(opts.model ? { model: opts.model } : {}),
       worktree: opts.worktree ?? false,
@@ -304,9 +312,7 @@ function dispatchCreateFrame(
     // CLI at the desktop's real terminal size. Sending a nominal one printed
     // the entire first turn at that width, and no later resize can rewrap
     // what's already in the scrollback.
-    initialInput: [opts.prompt, opts.role && rolePrompt(opts.role), RESULT_CONTRACT]
-      .filter(Boolean)
-      .join("\n\n"),
+    initialInput: dispatchPrompt(opts),
     skipPermissions: true,
     isolateWorktree: opts.worktree ?? false,
     dispatchId,

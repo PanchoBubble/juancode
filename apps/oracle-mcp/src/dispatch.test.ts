@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import { appendDispatch, dispatch } from "./dispatch.ts";
 import { rolePrompt } from "./roles.ts";
+import { RESULT_CONTRACT } from "./result-block.ts";
 import { DispatchConflictError, type DispatchDeps } from "./dispatch.ts";
 import { sessionNotifications } from "./session-notifications.ts";
 import { consumeQueuedDispatch } from "./dispatch-results.ts";
@@ -183,7 +184,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     });
     const [line] = mailboxLines();
     expect(line).toMatchObject({ role: "tester", fromSessionId: "parent-1" });
-    expect(line!.prompt).toContain(rolePrompt("tester"));
+    expect(line!.prompt).toBe(`check it\n\n${rolePrompt("tester")}\n\n${RESULT_CONTRACT}`);
   });
 
   it("forwards an explicit model and omits the CLI-default override", async () => {
@@ -286,7 +287,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(mailboxLines()).toEqual([
       {
         project: "/abs/repo",
-        prompt: "later",
+        prompt: `later\n\n${RESULT_CONTRACT}`,
         model: "sonnet",
         provider: "claude",
         worktree: false,
@@ -329,7 +330,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toEqual({
       project: "/abs/repo",
-      prompt: "later",
+      prompt: `later\n\n${RESULT_CONTRACT}`,
       model: "sonnet",
       provider: "claude",
       worktree: true,
@@ -416,14 +417,14 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(lines).toEqual([
       {
         project: "/abs/repo",
-        prompt: "do the thing",
+        prompt: `do the thing\n\n${RESULT_CONTRACT}`,
         provider: "claude",
         worktree: false,
         dispatchId: "id-1",
       },
       {
         project: "/other",
-        prompt: "isolated",
+        prompt: `isolated\n\n${RESULT_CONTRACT}`,
         provider: "codex",
         worktree: true,
         dispatchId: "id-2",
