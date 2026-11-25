@@ -166,6 +166,7 @@ struct ChainOverviewView: View {
 
             ChainQuestionsInbox(slug: chain.slug)
             ChainHandoffsPanel(chain: chain)
+            ChainSubchainNodes(children: model.chains.children(of: chain.slug))
 
             if mode == .graph && !chain.members.isEmpty {
                 ChainGraphView(chain: chain, query: query)

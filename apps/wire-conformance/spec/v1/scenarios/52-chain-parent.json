@@ -1,0 +1,74 @@
+{
+  "id": "chain-parent",
+  "title": "a chain nests under a parent chain, never in a cycle",
+  "asserts": "a core that advertises `chainParent` honours `setChainParent`: the child is published whole with `parent` set, a parent that would make a chain its own ancestor is refused with `chain-parent-cycle` and publishes nothing, and deleting the parent lifts the child to the top, published after the `chainRemoved` without `parent`. The sub-orchestrator dispatch that nests on its own, and the parent surviving a restart, are covered by the core's own tests.",
+  "capabilities": ["chains", "chainParent"],
+  "steps": [
+    { "send": { "type": "subscribeChains" } },
+    { "expect": { "type": "chains", "chains": { "$type": "array" } }, "timeoutMs": 10000 },
+    { "send": { "type": "createChain", "slug": "$chainParentSlug" } },
+    { "expect": { "type": "chainResult", "op": "create", "ok": true } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainParentSlug", "parent": { "$absent": true } }
+      }
+    },
+    { "send": { "type": "createChain", "slug": "$chainParentChildSlug" } },
+    { "expect": { "type": "chainResult", "op": "create", "ok": true } },
+    { "expect": { "type": "chain", "chain": { "slug": "$chainParentChildSlug" } } },
+    {
+      "send": {
+        "type": "setChainParent",
+        "slug": "$chainParentChildSlug",
+        "parent": "$chainParentSlug",
+        "requestId": "$requestId"
+      }
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "setParent",
+        "ok": true,
+        "requestId": "$requestId",
+        "slug": "$chainParentChildSlug"
+      }
+    },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainParentChildSlug", "parent": "$chainParentSlug" }
+      }
+    },
+    {
+      "send": {
+        "type": "setChainParent",
+        "slug": "$chainParentSlug",
+        "parent": "$chainParentChildSlug"
+      },
+      "note": "the parent under its own child would be a loop"
+    },
+    {
+      "expect": {
+        "type": "chainResult",
+        "op": "setParent",
+        "ok": false,
+        "error": "chain-parent-cycle"
+      },
+      "note": "a refusal publishes nothing"
+    },
+    { "send": { "type": "deleteChain", "slug": "$chainParentSlug" } },
+    { "expect": { "type": "chainResult", "op": "delete", "ok": true } },
+    { "expect": { "type": "chainRemoved", "slug": "$chainParentSlug" } },
+    {
+      "expect": {
+        "type": "chain",
+        "chain": { "slug": "$chainParentChildSlug", "parent": { "$absent": true } }
+      },
+      "note": "the child is lifted to the top, never deleted with its parent"
+    },
+    { "send": { "type": "deleteChain", "slug": "$chainParentChildSlug" } },
+    { "expect": { "type": "chainResult", "op": "delete", "ok": true } },
+    { "expect": { "type": "chainRemoved", "slug": "$chainParentChildSlug" } }
+  ]
+}

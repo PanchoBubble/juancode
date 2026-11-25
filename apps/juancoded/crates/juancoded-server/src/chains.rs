@@ -369,9 +369,56 @@ impl Chains {
             Ok(false) => return Err("chain-not-found"),
             Err(e) => return Err(store_failed(e)),
         }
-        book.retain(|c| c.slug != slug);
+        // Its child chains are lifted to the top by the store (`ON DELETE SET NULL`), so
+        // they move too and are published whole after the removal.
+        let children: Vec<String> = book
+            .iter()
+            .filter(|c| c.parent.as_deref() == Some(slug))
+            .map(|c| c.slug.clone())
+            .collect();
+        match self.store.chains() {
+            Ok(fresh) => *book = fresh,
+            Err(e) => {
+                warn!("could not reload the chains after a delete: {e:#}");
+                book.retain(|c| c.slug != slug);
+            }
+        }
         let _ = self.changes.send(ChainChange::Removed(slug.to_string()));
+        for chain in book.iter().filter(|c| children.contains(&c.slug)) {
+            let _ = self.changes.send(ChainChange::Upsert(chain.clone()));
+        }
         Ok(())
+    }
+
+    /// Nest `slug` under chain `parent`, or lift it to the top with `None`. A chain
+    /// cannot be its own ancestor: a parent that is `slug` or sits under it is refused
+    /// (`chain-parent-cycle`). Setting the parent it already has publishes nothing.
+    pub fn set_parent(&self, slug: &str, parent: Option<&str>) -> Result<(), ChainRefusal> {
+        self.mutate(|store| {
+            let book = store.chains().map_err(store_failed)?;
+            let find = |s: &str| book.iter().find(|c| c.slug == s);
+            if find(slug).ok_or("chain-not-found")?.parent.as_deref() == parent {
+                return Ok(Vec::new());
+            }
+            if let Some(parent) = parent {
+                find(parent).ok_or("chain-parent-not-found")?;
+                // Walk up from the new parent; meeting `slug` would close a loop. Bounded
+                // by the book's size so a loop already in the file cannot hang the walk.
+                let mut at = Some(parent);
+                for _ in 0..=book.len() {
+                    let Some(here) = at else { break };
+                    if here == slug {
+                        return Err("chain-parent-cycle");
+                    }
+                    at = find(here).and_then(|c| c.parent.as_deref());
+                }
+            }
+            match store.set_chain_parent(slug, parent) {
+                Ok(true) => Ok(vec![slug.to_string()]),
+                Ok(false) => Err("chain-not-found"),
+                Err(e) => Err(store_failed(e)),
+            }
+        })
     }
 
     /// Put an item in `slug`, or take it out of whatever chain holds it when `slug` is
@@ -465,8 +512,15 @@ impl Chains {
     /// Give a dispatch a chain even when its source is absent or no longer known.
     /// Prefer inheritance, and never move a session that already belongs to a chain.
     /// `role` is the dispatch's label for the new member (juancode-8oa5.7).
+    ///
+    /// An `orchestrator` dispatched from a chained session is a sub-orchestrator: it gets
+    /// a chain of its own nested under that session's chain (juancode-8oa5.9), so the
+    /// work it dispatches groups under it rather than flattening into the parent.
     pub fn chain_dispatch(&self, session_id: &str, from_session: Option<&str>, role: Option<&str>) {
         if let Some(from) = from_session {
+            if role == Some("orchestrator") && self.nest(session_id, from) {
+                return;
+            }
             self.inherit_as(from, ChainMemberKind::Session, session_id, None, None, role);
         }
         let Some(session) = self.sessions.meta(session_id) else {
@@ -501,6 +555,57 @@ impl Chains {
         if let Err(code) = outcome {
             warn!(session = %session_id, code, "could not create a dispatch chain");
         }
+    }
+
+    /// Start a chain for the just-dispatched `session_id`, nested under the chain
+    /// `from_session` is in, holding only that session as `orchestrator`. `false` (and
+    /// nothing written) when the source is in no chain or the session is already in one.
+    fn nest(&self, session_id: &str, from_session: &str) -> bool {
+        let Some(session) = self.sessions.meta(session_id) else {
+            return false;
+        };
+        let mut started = None;
+        let outcome = self.mutate(|store| {
+            let book = store.chains().map_err(store_failed)?;
+            let holds = |c: &Chain, id: &str| {
+                c.members
+                    .iter()
+                    .any(|m| m.kind == ChainMemberKind::Session && m.ref_id == id)
+            };
+            if book.iter().any(|c| holds(c, session_id)) {
+                return Ok(Vec::new());
+            }
+            let Some(parent) = book.iter().find(|c| holds(c, from_session)) else {
+                return Ok(Vec::new());
+            };
+            let slug = start_chain_for(store, &session)?;
+            store
+                .set_chain_parent(&slug, Some(&parent.slug))
+                .map_err(store_failed)?;
+            store
+                .set_member(
+                    &slug,
+                    &ChainMember {
+                        kind: ChainMemberKind::Session,
+                        ref_id: session_id.to_string(),
+                        title: None,
+                        url: None,
+                        added_at: now_ms(),
+                        done: false,
+                        role: Some("orchestrator".into()),
+                    },
+                )
+                .map_err(store_failed)?;
+            started = Some(slug.clone());
+            Ok(vec![slug])
+        });
+        if let Err(code) = outcome {
+            warn!(session = %session_id, code, "could not start a nested chain");
+        }
+        if let Some(slug) = &started {
+            info!(from = %from_session, session = %session_id, chain = %slug, "started a nested chain for a sub-orchestrator");
+        }
+        started.is_some()
     }
 
     /// Put a just-created item in whatever chain `from_session` is in: the session an
@@ -1323,6 +1428,69 @@ mod tests {
         );
         assert_eq!(chains.list().len(), 2);
         for id in [oracle, first, second, loner, orphan] {
+            let _ = h.sessions.kill(&id);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sub_orchestrator_gets_a_nested_chain_and_a_parent_never_cycles() {
+        let (h, chains) = engine();
+        let top = session(&h);
+        let worker = session(&h);
+        let sub = session(&h);
+        let sub_worker = session(&h);
+        chains.chain_dispatch(&worker, Some(&top), Some("implementer"));
+        let parent = chains.chain_of(ChainMemberKind::Session, &top).unwrap();
+        let mut rx = chains.subscribe();
+
+        chains.chain_dispatch(&sub, Some(&top), Some("orchestrator"));
+        let child = chains.chain_of(ChainMemberKind::Session, &sub).unwrap();
+        assert_ne!(child, parent, "an item is still in one chain: its own");
+        assert_eq!(slugs_of(&drain(&mut rx)), std::slice::from_ref(&child));
+        let find = |slug: &str| chains.list().into_iter().find(|c| c.slug == slug).unwrap();
+        assert_eq!(find(&child).parent.as_deref(), Some(parent.as_str()));
+        assert_eq!(
+            find(&child).members[0].role.as_deref(),
+            Some("orchestrator")
+        );
+        // What the sub-orchestrator dispatches joins its chain, not the parent's.
+        chains.chain_dispatch(&sub_worker, Some(&sub), Some("tester"));
+        assert_eq!(
+            chains.chain_of(ChainMemberKind::Session, &sub_worker),
+            Some(child.clone())
+        );
+
+        // Cycles are refused, whether direct or through a grandchild.
+        assert_eq!(
+            chains.set_parent(&parent, Some(&child)),
+            Err("chain-parent-cycle")
+        );
+        assert_eq!(
+            chains.set_parent(&child, Some(&child)),
+            Err("chain-parent-cycle")
+        );
+        chains.create("grandchild").unwrap();
+        chains.set_parent("grandchild", Some(&child)).unwrap();
+        assert_eq!(
+            chains.set_parent(&parent, Some("grandchild")),
+            Err("chain-parent-cycle")
+        );
+        assert_eq!(
+            chains.set_parent("grandchild", Some("nope")),
+            Err("chain-parent-not-found")
+        );
+        drain(&mut rx);
+        chains.set_parent("grandchild", Some(&child)).unwrap();
+        assert!(drain(&mut rx).is_empty(), "the parent it has is a no-op");
+
+        // Deleting a parent lifts its children to the top and publishes them.
+        chains.delete(&child).unwrap();
+        assert_eq!(
+            slugs_of(&drain(&mut rx)),
+            [format!("-{child}"), "grandchild".to_string()]
+        );
+        assert_eq!(find("grandchild").parent, None);
+        for id in [top, worker, sub, sub_worker] {
             let _ = h.sessions.kill(&id);
         }
     }

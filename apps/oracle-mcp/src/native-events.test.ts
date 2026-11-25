@@ -822,4 +822,9 @@ describe("applyChainFrame", () => {
     });
     expect(parseChain({ state: "active" })).toBeNull();
   });
+
+  it("keeps a nested chain's parent and leaves a top-level chain without one", () => {
+    expect(parseChain({ slug: "child", parent: "epic", members: [] })?.parent).toBe("epic");
+    expect(parseChain({ slug: "top", members: [] })).not.toHaveProperty("parent");
+  });
 });

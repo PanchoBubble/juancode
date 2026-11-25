@@ -359,6 +359,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE chain_members ADD COLUMN role TEXT;
     "#,
+    // 20: the chain a chain nests under (juancode-8oa5.9). NULL is a top-level chain;
+    // deleting the parent lifts its children to the top rather than deleting them.
+    r#"
+    ALTER TABLE chains ADD COLUMN parent TEXT REFERENCES chains(slug) ON DELETE SET NULL;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

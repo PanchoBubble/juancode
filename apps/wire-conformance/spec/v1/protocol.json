@@ -1,5 +1,5 @@
 {
-  "specRevision": "1.24.0",
+  "specRevision": "1.25.0",
   "protocolVersion": 1,
   "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
@@ -48,6 +48,7 @@
       "chainInherit",
       "chainAutoClose",
       "chainHandoffs",
+      "chainParent",
       "programStatus"
     ],
     "gates": {
@@ -117,6 +118,7 @@
       ],
       "chainInherit": ["create.fromSessionId", "trackPr.fromSessionId"],
       "chainAutoClose": ["setChainMember.done"],
+      "chainParent": ["setChainParent"],
       "chainHandoffs": [
         "subscribeHandoffs",
         "createHandoff",
@@ -462,6 +464,12 @@
       "capability": "chains",
       "notes": "Delete a chain. Its members are untagged, never deleted: a chain is a label on work and removing the label must not reach the work. The slug is free again afterwards. Answered by `chainResult` to the asker and by the change stream to every subscriber."
     },
+    "setChainParent": {
+      "required": ["slug"],
+      "optional": ["parent", "requestId"],
+      "capability": "chainParent",
+      "notes": "Nest chain `slug` under chain `parent`, or lift it to the top when `parent` is absent or null. Nesting never changes membership: an item is still in at most one chain, and a child chain is drawn in its parent as one node. A chain cannot be its own ancestor (`chain-parent-cycle`); a `parent` that names no chain is `chain-parent-not-found`. Setting the parent it already has is a no-op and publishes nothing. Deleting a parent lifts its children to the top, and each is published whole after the `chainRemoved`. A core advertising `chainParent` also nests on its own: a `create` with `fromSessionId` and `role: orchestrator` from a chained session starts a new chain holding only the new session, with `parent` set to the source's chain. Answered by `chainResult` (`op: setParent`) to the asker and by the change stream to every subscriber."
+    },
     "setChainMember": {
       "required": ["kind", "ref"],
       "optional": ["slug", "title", "url", "done", "requestId"],
@@ -693,7 +701,7 @@
       "required": ["chains"],
       "optional": [],
       "capability": "chains",
-      "notes": "Every chain, in answer to `subscribeChains`, oldest first. Each is { slug, state: active|inactive, createdAt, closedAt (null while active), members: [{ kind, ref, title?, url?, addedAt, done? }] } (`done` present only while true, on a ticket reported done) with members in the order they joined. Replace wholesale. Membership travels here and not on `SessionMeta`: one fact, one frame, so a move is never two frames that could disagree."
+      "notes": "Every chain, in answer to `subscribeChains`, oldest first. Each is { slug, state: active|inactive, createdAt, closedAt (null while active), parent?, members: [{ kind, ref, title?, url?, addedAt, done?, role? }] } (`done` present only while true, on a ticket reported done; `parent`, gated by `chainParent`, is the slug of the chain this one nests under and present only when set, so a client that ignores it sees every chain at the top) with members in the order they joined. Replace wholesale. Membership travels here and not on `SessionMeta`: one fact, one frame, so a move is never two frames that could disagree."
     },
     "chain": {
       "required": ["chain"],

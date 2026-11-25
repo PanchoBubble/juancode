@@ -54,6 +54,11 @@ final class ChainsClientTests: XCTestCase {
         XCTAssertNil(chain.members[0].title)
         XCTAssertEqual(chain.members[1].role, "tester")
         XCTAssertNil(chain.members[0].role)
+        XCTAssertNil(chain.parent, "a top-level chain")
+        let nested = try JSONDecoder().decode(Chain.self, from: Data(
+            #"{"slug":"sub","state":"active","createdAt":1,"closedAt":null,"members":[],"parent":"auth-rewrite"}"#.utf8))
+        XCTAssertEqual(nested.parent, "auth-rewrite")
+        XCTAssertEqual(ChainBook([chain, nested]).children(of: "auth-rewrite").map(\.slug), ["sub"])
     }
 
     // MARK: - The frames

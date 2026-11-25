@@ -46,6 +46,9 @@ pub trait ChainStore: Send + Sync {
     ) -> Result<bool>;
     /// Delete a chain, untagging its members. `false` when there was none.
     fn delete_chain(&self, slug: &str) -> Result<bool>;
+    /// Nest `slug` under `parent`, or lift it to the top with `None`. `false` when there
+    /// is no such chain. The engine refuses cycles; the store only keeps the link.
+    fn set_chain_parent(&self, slug: &str, parent: Option<&str>) -> Result<bool>;
     /// Put an item in `slug`, moving it out of whatever chain held it. Returns that
     /// previous chain, which is `Some(slug)` itself for a re-tag into the same one.
     fn set_member(&self, slug: &str, member: &ChainMember) -> Result<Option<String>>;
@@ -173,7 +176,7 @@ impl ChainStore for SqliteStore {
     fn chains(&self) -> Result<Vec<Chain>> {
         let conn = self.conn_for_chains();
         let mut stmt = conn.prepare(
-            "SELECT slug, state, created_at, closed_at, id, name FROM chains ORDER BY created_at ASC, slug ASC",
+            "SELECT slug, state, created_at, closed_at, id, name, parent FROM chains ORDER BY created_at ASC, slug ASC",
         )?;
         let mut chains = stmt
             .query_map([], |row| {
@@ -188,6 +191,7 @@ impl ChainStore for SqliteStore {
                     created_at: row.get(2)?,
                     closed_at: row.get(3)?,
                     members: Vec::new(),
+                    parent: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -260,6 +264,14 @@ impl ChainStore for SqliteStore {
             .conn_for_chains()
             .execute("DELETE FROM chains WHERE slug = ?1", params![slug])?;
         Ok(deleted > 0)
+    }
+
+    fn set_chain_parent(&self, slug: &str, parent: Option<&str>) -> Result<bool> {
+        let updated = self.conn_for_chains().execute(
+            "UPDATE chains SET parent = ?2 WHERE slug = ?1",
+            params![slug, parent],
+        )?;
+        Ok(updated > 0)
     }
 
     fn set_member(&self, slug: &str, member: &ChainMember) -> Result<Option<String>> {
@@ -435,6 +447,9 @@ mod tests {
             assert!(store
                 .set_chain_state("billing", ChainState::Inactive, Some(9))
                 .unwrap());
+            assert!(store
+                .set_chain_parent("billing", Some("auth-rewrite"))
+                .unwrap());
         }
         let store = SqliteStore::open(&path).unwrap();
         let chains = store.chains().unwrap();
@@ -455,6 +470,13 @@ mod tests {
         assert_eq!(chains[0].members[0].role, None);
         assert_eq!(chains[1].state, ChainState::Inactive);
         assert_eq!(chains[1].closed_at, Some(9));
+        assert_eq!(chains[1].parent.as_deref(), Some("auth-rewrite"));
+        assert_eq!(chains[0].parent, None);
+        // Deleting the parent lifts the child to the top, never deletes it.
+        assert!(store.delete_chain("auth-rewrite").unwrap());
+        let chains = store.chains().unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].parent, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 

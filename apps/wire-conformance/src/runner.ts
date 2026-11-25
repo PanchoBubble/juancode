@@ -500,6 +500,8 @@ export function seedVars(
     chainHandoffId: `conformance-handoff-${stamp}`,
     chainHandoffSlug: `conformance-handoff-chain-${stamp}`,
     chainHandoffNextId: `conformance-handoff-next-${stamp}`,
+    chainParentSlug: `conformance-parent-${stamp}`,
+    chainParentChildSlug: `conformance-parent-child-${stamp}`,
     // Where the fake agent's `SPAWN` records its helper's pid. Fixed per workspace
     // rather than stamped like the ids above, because the AGENT has to write it
     // knowing only its own cwd: an `input` frame carries one literal string, and

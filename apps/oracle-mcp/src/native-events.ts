@@ -810,6 +810,8 @@ export interface Chain {
   closedAt: number | null;
   /** In the order they joined. */
   members: ChainMember[];
+  /** The slug of the chain this one nests under (a sub-orchestrator's chain). */
+  parent?: string;
 }
 
 /** The answer to one chain write. `error` is a code (`chain-exists`,
@@ -1121,7 +1123,7 @@ export function parseChain(raw: unknown): Chain | null {
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
   if (typeof row.slug !== "string") return null;
-  return {
+  const chain: Chain = {
     slug: row.slug,
     state: row.state === "inactive" ? "inactive" : "active",
     createdAt: typeof row.createdAt === "number" ? row.createdAt : 0,
@@ -1130,6 +1132,8 @@ export function parseChain(raw: unknown): Chain | null {
       ? row.members.map(parseChainMember).filter((m): m is ChainMember => m !== null)
       : [],
   };
+  if (typeof row.parent === "string") chain.parent = row.parent;
+  return chain;
 }
 
 /** Apply one `chains` / `chain` / `chainRemoved` frame to a book, returning the new

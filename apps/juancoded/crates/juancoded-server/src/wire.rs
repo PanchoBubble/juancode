@@ -255,6 +255,9 @@ pub const CAPABILITIES: &[&str] = &[
     // it on a guess.
     "chainAutoClose",
     "chainHandoffs",
+    // Nested chains (juancode-8oa5.9): `setChainParent` is honoured, a chain carries
+    // `parent`, and a sub-orchestrator dispatch gets a chain nested under its source's.
+    "chainParent",
 ];
 
 /// One queued occurrence on the wire.
@@ -684,6 +687,13 @@ pub enum ClientMessage {
         slug: String,
         request_id: Option<String>,
     },
+    /// Nest chain `slug` under chain `parent`, or lift it to the top when `parent` is
+    /// absent or null. A cycle is refused (`chain-parent-cycle`).
+    SetChainParent {
+        slug: String,
+        parent: Option<String>,
+        request_id: Option<String>,
+    },
     /// Put one item in chain `slug`, moving it out of any chain that held it, or take
     /// it out of its chain when `slug` is absent or null. `title`/`url` snapshot an item
     /// this core cannot look up (a beads or Linear ticket), and `done` is that ticket's
@@ -1020,6 +1030,9 @@ struct RawClient {
     /// Chains (juancode-dbo.1).
     #[serde(default)]
     slug: Option<String>,
+    /// `setChainParent` (juancode-8oa5.9).
+    #[serde(default)]
+    parent: Option<String>,
     #[serde(default)]
     kind: Option<String>,
     #[serde(rename = "ref", default)]
@@ -1356,6 +1369,11 @@ impl ClientMessage {
             }),
             "deleteChain" => Ok(Self::DeleteChain {
                 slug: raw.slug.ok_or("missing slug")?,
+                request_id: raw.request_id,
+            }),
+            "setChainParent" => Ok(Self::SetChainParent {
+                slug: raw.slug.ok_or("missing slug")?,
+                parent: raw.parent.filter(|p| !p.is_empty()),
                 request_id: raw.request_id,
             }),
             "setChainMember" => Ok(Self::SetChainMember {
@@ -2571,6 +2589,8 @@ mod tests {
             r#"{"type":"closeChain","slug":"auth-rewrite"}"#,
             r#"{"type":"reopenChain","slug":"auth-rewrite"}"#,
             r#"{"type":"deleteChain","slug":"auth-rewrite"}"#,
+            r#"{"type":"setChainParent","slug":"auth-rewrite","parent":"epic"}"#,
+            r#"{"type":"setChainParent","slug":"auth-rewrite","parent":null}"#,
             r#"{"type":"setChainMember","kind":"beads","ref":"juancode-dbo.1","slug":"auth-rewrite","title":"t","url":"u"}"#,
             r#"{"type":"setChainMember","kind":"session","ref":"s","slug":null}"#,
         ] {
@@ -2690,6 +2710,7 @@ mod tests {
                     "chainInherit",
                     "chainAutoClose",
                     "chainHandoffs",
+                    "chainParent",
                 ]
                 .contains(advertised),
                 "unimplemented capability advertised: {advertised}"
@@ -2707,6 +2728,7 @@ mod tests {
             state: ChainState::Inactive,
             created_at: 1,
             closed_at: Some(2),
+            parent: None,
             members: vec![ChainMember {
                 kind: ChainMemberKind::TrackedPr,
                 ref_id: "/repo#7".into(),

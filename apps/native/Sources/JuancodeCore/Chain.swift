@@ -63,11 +63,14 @@ public struct Chain: Codable, Sendable, Equatable, Identifiable {
     /// When it was last closed; nil while active.
     public var closedAt: Int?
     public var members: [ChainMember]
+    /// The slug of the chain this one nests under (a sub-orchestrator's chain,
+    /// juancode-8oa5.9); nil for a top-level chain.
+    public var parent: String?
 
     public var isActive: Bool { state == .active }
 
     public init(slug: String, id: String? = nil, name: String? = nil, state: ChainState = .active, createdAt: Int = 0,
-                closedAt: Int? = nil, members: [ChainMember] = []) {
+                closedAt: Int? = nil, members: [ChainMember] = [], parent: String? = nil) {
         self.slug = slug
         self.id = id ?? slug
         self.name = name ?? slug
@@ -75,10 +78,11 @@ public struct Chain: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.closedAt = closedAt
         self.members = members
+        self.parent = parent
     }
 
     private enum CodingKeys: String, CodingKey {
-        case slug, id, name, state, createdAt, closedAt, members
+        case slug, id, name, state, createdAt, closedAt, members, parent
     }
 
     public init(from decoder: Decoder) throws {
@@ -90,6 +94,7 @@ public struct Chain: Codable, Sendable, Equatable, Identifiable {
         createdAt = try c.decode(Int.self, forKey: .createdAt)
         closedAt = try c.decodeIfPresent(Int.self, forKey: .closedAt)
         members = try c.decode([ChainMember].self, forKey: .members)
+        parent = try c.decodeIfPresent(String.self, forKey: .parent)
     }
 
     /// `closedAt` is written as null rather than omitted while the chain is active,
@@ -103,6 +108,7 @@ public struct Chain: Codable, Sendable, Equatable, Identifiable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(closedAt, forKey: .closedAt)
         try c.encode(members, forKey: .members)
+        try c.encodeIfPresent(parent, forKey: .parent)
     }
 }
 
@@ -125,6 +131,11 @@ public struct ChainBook: Sendable, Equatable {
 
     public subscript(slug: String) -> Chain? {
         chains.first { $0.slug == slug }
+    }
+
+    /// The chains nested directly under `slug` (juancode-8oa5.9), oldest first.
+    public func children(of slug: String) -> [Chain] {
+        chains.filter { $0.parent == slug }
     }
 
     /// The chain an item is in, if any.

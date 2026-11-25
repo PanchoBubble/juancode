@@ -214,6 +214,11 @@ pub struct Chain {
     /// When it was last closed. `None` while active; a reopen clears it.
     pub closed_at: Option<i64>,
     pub members: Vec<ChainMember>,
+    /// The chain this one nests under (its slug): a sub-orchestrator's chain names the
+    /// chain it was dispatched from (juancode-8oa5.9). Never a cycle. On the wire only
+    /// when set, so a client that does not know it sees a top-level chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// Why a slug was refused. The `code` is what goes on the wire.
@@ -390,6 +395,7 @@ mod tests {
             state: ChainState::Active,
             created_at: 1,
             closed_at: None,
+            parent: None,
             members: Vec::new(),
         };
         let finished = |_: &ChainMember| MemberStatus::Finished;

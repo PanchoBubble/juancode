@@ -2158,6 +2158,17 @@ fn handle_client_message(
             outbound.push(chain_result("delete", Some(slug), request_id, outcome));
         }
 
+        ClientMessage::SetChainParent {
+            slug,
+            parent,
+            request_id,
+        } => {
+            let outcome = chains.map_or(Err("chain-unavailable"), |c| {
+                c.set_parent(&slug, parent.as_deref())
+            });
+            outbound.push(chain_result("setParent", Some(slug), request_id, outcome));
+        }
+
         ClientMessage::SetChainMember {
             kind,
             ref_id,
