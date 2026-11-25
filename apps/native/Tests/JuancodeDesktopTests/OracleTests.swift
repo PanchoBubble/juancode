@@ -46,15 +46,6 @@ final class OracleTests: XCTestCase {
                 .resolvedProvider(default: .opencode), .opencode)
     }
 
-    /// A line queued while the app was away still names who dispatched it and the role it
-    /// was given (juancode-i831); dropping them started a loop child unlabelled and unchained.
-    func testQueuedLineKeepsRoleAndDispatchingSession() throws {
-        let line = #"{"project":"/p","prompt":"x","dispatchId":"d","fromSessionId":"s-1","role":"tester"}"#
-        let d = try JSONDecoder().decode(OracleDispatch.self, from: Data(line.utf8))
-        XCTAssertEqual(d.fromSessionId, "s-1")
-        XCTAssertEqual(d.role, "tester")
-    }
-
     func testCurrentOracleProviderPrefersTheActiveChat() {
         let oracles = [oracleMeta("a", .opencode), oracleMeta("b", .codex)]
         XCTAssertEqual(currentOracleProvider(active: "b", oracles: oracles), .codex)

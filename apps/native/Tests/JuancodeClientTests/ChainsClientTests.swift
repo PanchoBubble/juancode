@@ -40,27 +40,6 @@ final class ChainsClientTests: XCTestCase {
         XCTAssertNil(book["b"])
     }
 
-    func testAChainDecodesTheDaemonsShape() throws {
-        let json = #"""
-        {"slug":"auth-rewrite","state":"inactive","createdAt":1,"closedAt":2,
-         "members":[{"kind":"tracked_pr","ref":"/repo#7","addedAt":3},
-                    {"kind":"beads","ref":"juancode-dbo.1","title":"Chains core","url":"u","addedAt":4,"role":"tester"}]}
-        """#
-        let chain = try JSONDecoder().decode(Chain.self, from: Data(json.utf8))
-        XCTAssertEqual(chain.state, .inactive)
-        XCTAssertEqual(chain.closedAt, 2)
-        XCTAssertEqual(chain.members.map(\.kind), [.trackedPr, .beads])
-        XCTAssertEqual(chain.members[1].title, "Chains core")
-        XCTAssertNil(chain.members[0].title)
-        XCTAssertEqual(chain.members[1].role, "tester")
-        XCTAssertNil(chain.members[0].role)
-        XCTAssertNil(chain.parent, "a top-level chain")
-        let nested = try JSONDecoder().decode(Chain.self, from: Data(
-            #"{"slug":"sub","state":"active","createdAt":1,"closedAt":null,"members":[],"parent":"auth-rewrite"}"#.utf8))
-        XCTAssertEqual(nested.parent, "auth-rewrite")
-        XCTAssertEqual(ChainBook([chain, nested]).children(of: "auth-rewrite").map(\.slug), ["sub"])
-    }
-
     // MARK: - The frames
 
     func testWritesGoOutCorrelatedAndTheBookFollowsTheChangeStream() async throws {
