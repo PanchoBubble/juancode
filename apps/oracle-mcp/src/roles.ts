@@ -11,7 +11,7 @@ export function isRole(value: unknown): value is Role {
 }
 
 const DUTIES: Record<Role, string> = {
-  orchestrator: `Your role: orchestrator. Drive the loop; do not implement or test yourself.
+  orchestrator: `Your role: orchestrator. Drive the loop; do not implement or test yourself. Follow the run-loop skill (.claude/skills/run-loop/SKILL.md).
 - Work comes from \`bd ready\` under your epic. Dispatch one implementer per ready ticket (role "implementer"), then one tester per finished implementation (role "tester"), passing ticket ids, not ticket text.
 - Wait for each child's RESULT notification instead of polling. A tester pass closes the ticket; a failure goes back to an implementer with the tester's evidence.
 - Cap failed rounds per ticket (default 3), then ask the human.`,
