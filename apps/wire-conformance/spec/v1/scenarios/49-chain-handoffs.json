@@ -6,6 +6,8 @@
   "steps": [
     { "send": { "type": "subscribeHandoffs" } },
     { "expect": { "type": "handoffs", "handoffs": { "$type": "array" } }, "timeoutMs": 10000 },
+    { "send": { "type": "subscribeChains" } },
+    { "expect": { "type": "chains", "chains": { "$type": "array" } }, "timeoutMs": 10000 },
     { "send": { "type": "createChain", "slug": "$chainHandoffSlug", "requestId": "$requestId" } },
     { "expect": { "type": "chainResult", "op": "create", "ok": true, "requestId": "$requestId" } },
     { "expect": { "type": "chain", "chain": { "slug": "$chainHandoffSlug", "state": "active" } } },
