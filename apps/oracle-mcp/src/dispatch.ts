@@ -162,12 +162,14 @@ export async function appendDispatch(opts: DispatchRequest, dispatchId: string):
   const line =
     JSON.stringify({
       project: opts.project,
-      prompt: opts.prompt,
+      // The role's template rides in the prompt (the Swift reader sends it verbatim), as on a live create.
+      prompt: opts.role ? `${opts.prompt}\n\n${rolePrompt(opts.role)}` : opts.prompt,
       provider: opts.provider ?? "claude",
       ...(opts.model ? { model: opts.model } : {}),
       worktree: opts.worktree ?? false,
       dispatchId,
       ...(opts.fromSessionId ? { fromSessionId: opts.fromSessionId } : {}),
+      ...(opts.role ? { role: opts.role } : {}),
     }) + "\n";
   await appendFile(dispatchFile(), line, "utf8");
 }

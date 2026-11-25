@@ -71,6 +71,7 @@ public protocol CoreClient: AnyObject, Sendable {
     func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                 opts: SpawnOptions, worktree: SessionWorktree?,
                 dispatchId: String?, initialInput: String?,
+                fromSessionId: String?, role: String?,
                 onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession
 
     /// Spawn an editor session rooted in `parent`'s effective working directory.

@@ -36,15 +36,24 @@ public struct OracleDispatch: Codable, Sendable, Equatable {
     /// was delivered over the WS AND appended to the mailbox during a race. Absent
     /// on lines the Oracle agent writes by hand — those are never WS-delivered.
     public var dispatchId: String?
+    /// The session that dispatched it: the daemon makes it the new session's parent and
+    /// puts the new session in its chain. Absent for a dispatch no session made.
+    public var fromSessionId: String?
+    /// The loop role (`orchestrator`, `planner`, `implementer`, `tester`): the new
+    /// session's label in its chain.
+    public var role: String?
 
     public init(project: String, prompt: String, provider: String? = nil,
-                worktree: Bool? = nil, model: String? = nil, dispatchId: String? = nil) {
+                worktree: Bool? = nil, model: String? = nil, dispatchId: String? = nil,
+                fromSessionId: String? = nil, role: String? = nil) {
         self.project = project
         self.prompt = prompt
         self.provider = provider
         self.worktree = worktree
         self.model = model
         self.dispatchId = dispatchId
+        self.fromSessionId = fromSessionId
+        self.role = role
     }
 
     /// Resolve `provider` to a `ProviderId`, defaulting to Claude for an absent or

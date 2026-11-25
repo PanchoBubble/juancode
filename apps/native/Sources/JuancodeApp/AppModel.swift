@@ -2043,6 +2043,7 @@ final class AppModel {
                 isolateWorktree: Bool, initialInput: String? = nil, select: Bool = false,
                 cols: Int? = nil, rows: Int? = nil, model: String? = nil,
                 worktreeName: String? = nil, dispatchId: String? = nil,
+                fromSessionId: String? = nil, role: String? = nil,
                 reclaimSlot: Bool = false) async -> (any LiveSession)? {
         // A folder you're starting work in must not stay hidden — the new session
         // would land in a section nobody can see.
@@ -2102,6 +2103,7 @@ final class AppModel {
                     provider: provider, cwd: cwdToUse, cols: grid.cols, rows: grid.rows,
                     opts: SpawnOptions(skipPermissions: skipPermissions, model: model), worktree: wt,
                     dispatchId: dispatchId, initialInput: seed,
+                    fromSessionId: fromSessionId, role: role,
                     // A prompt that never reached the agent is said out loud: the
                     // failure mode being guarded against is a session that looks
                     // started and is silently idle.
@@ -2131,6 +2133,7 @@ final class AppModel {
                                    isolateWorktree: isolateWorktree, initialInput: initialInput,
                                    select: select, cols: cols, rows: rows, model: model,
                                    worktreeName: worktreeName, dispatchId: dispatchId,
+                                   fromSessionId: fromSessionId, role: role,
                                    reclaimSlot: true)
             }
             return nil

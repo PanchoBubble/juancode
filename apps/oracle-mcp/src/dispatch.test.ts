@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import { appendDispatch, dispatch } from "./dispatch.ts";
+import { rolePrompt } from "./roles.ts";
 import { DispatchConflictError, type DispatchDeps } from "./dispatch.ts";
 import { sessionNotifications } from "./session-notifications.ts";
 import { consumeQueuedDispatch } from "./dispatch-results.ts";
@@ -171,6 +172,18 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(retry.state).toBe("duplicate");
     expect(retry.modelSelection).toEqual(first.modelSelection);
     expect(mailboxLines()).toHaveLength(1);
+  });
+
+  it("queues the role (with its template) and the dispatching session for a later start", async () => {
+    await dispatch({
+      project: "/abs/repo",
+      prompt: "check it",
+      role: "tester",
+      fromSessionId: "parent-1",
+    });
+    const [line] = mailboxLines();
+    expect(line).toMatchObject({ role: "tester", fromSessionId: "parent-1" });
+    expect(line!.prompt).toContain(rolePrompt("tester"));
   });
 
   it("forwards an explicit model and omits the CLI-default override", async () => {

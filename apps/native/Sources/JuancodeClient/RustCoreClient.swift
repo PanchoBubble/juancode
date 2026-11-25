@@ -460,6 +460,7 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
     public func create(provider: ProviderId, cwd: String, cols: Int, rows: Int,
                        opts: SpawnOptions, worktree: SessionWorktree?,
                        dispatchId: String?, initialInput: String?,
+                       fromSessionId: String? = nil, role: String? = nil,
                        onSeedFailure: (@Sendable (String, String) -> Void)?) throws -> any LiveSession {
         let pinsModel = supports(.spawnModel)
         if opts.model != nil, !pinsModel {
@@ -477,6 +478,9 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
         var frame = try Self.createFrame(provider: provider, cwd: cwd, cols: cols, rows: rows,
                                          opts: opts, worktree: worktree, pinsModel: pinsModel)
         if let dispatchId { frame["dispatchId"] = dispatchId }
+        // shortcut: sent without checking the core's `chainInherit`; an older core ignores both.
+        if let fromSessionId { frame["fromSessionId"] = fromSessionId }
+        if let role { frame["role"] = role }
         // The prompt travels on the create so the DAEMON delivers it: it owns the pty
         // and the parsed screen, so it is the only side that can confirm the paste
         // landed before pressing Enter. Delivering it from here instead is

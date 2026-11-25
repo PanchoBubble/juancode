@@ -620,7 +620,8 @@ final class OracleModel {
             let s = await app.create(provider: d.resolvedProvider(default: oracleProvider), cwd: d.project,
                                      skipPermissions: true, isolateWorktree: d.worktree ?? false,
                                      initialInput: d.prompt, select: false, model: d.model,
-                                     dispatchId: d.dispatchId ?? UUID().uuidString)
+                                     dispatchId: d.dispatchId ?? UUID().uuidString,
+                                     fromSessionId: d.fromSessionId, role: d.role)
             recordDispatchOutcome(d, sessionId: s?.id,
                                   error: s == nil ? (app.errorMessage ?? "failed to start the session") : nil)
         }
