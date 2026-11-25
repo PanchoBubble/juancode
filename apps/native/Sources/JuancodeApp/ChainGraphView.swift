@@ -384,6 +384,15 @@ private struct ChainGraphCardFace {
                 dot = meta.map { sessionDotColor(live: model.isLive($0.id), activity: model.activities[$0.id]) }
                 accent = oracle ? .purple : (dot ?? .secondary)
                 footer = oracle ? "Oracle dock" : (row?.project ?? "")
+                // A session sitting on an open handoff it is not moving (juancode-8oa5.14).
+                let stalled = model.chainHandoffs.handoffs.contains {
+                    $0.isOpen && $0.target.sessionId == ref.ref
+                        && $0.standing(owner: meta, activity: model.activity(ref.ref)) == .stalled
+                }
+                if stalled {
+                    status = ChainHandoffStanding.stalled.title
+                    dot = .orange
+                }
             case .trackedPr:
                 let pr = ChainPrRef(ref.ref)
                 kicker = "Pull request" + (pr.number.map { " #\($0)" } ?? "")
@@ -401,6 +410,8 @@ private struct ChainGraphCardFace {
                 accent = .indigo
                 footer = row?.project ?? ""
             }
+            // The loop role a dispatch gave it (juancode-8oa5.7) leads the kicker.
+            if let role = row?.member.role { kicker = role.capitalized + " · " + kicker }
         }
     }
 

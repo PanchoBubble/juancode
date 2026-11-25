@@ -149,6 +149,8 @@ struct ChainOverviewView: View {
                 .menuIndicator(.hidden)
                 .help("Chain actions")
             }
+            // Questions for you first (juancode-8oa5.14), then the graph, its search and next actions.
+            ChainQuestionsInbox(slug: chain.slug)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search members", text: $query)
@@ -164,7 +166,6 @@ struct ChainOverviewView: View {
             .padding(.horizontal, 8).padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.08)))
 
-            ChainQuestionsInbox(slug: chain.slug)
             ChainHandoffsPanel(chain: chain)
             ChainSubchainNodes(children: model.chains.children(of: chain.slug))
 

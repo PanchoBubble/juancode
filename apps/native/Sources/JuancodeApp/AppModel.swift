@@ -5743,6 +5743,12 @@ final class AppModel {
         chainHandoffs.handoffs(in: slug).filter { $0.isQuestion && $0.isOpen }
     }
 
+    /// Every chain's unanswered questions, oldest first: the toolbar's needs-you count
+    /// (juancode-8oa5.14).
+    var allOpenQuestions: [ChainHandoff] {
+        chainHandoffs.handoffs.filter { $0.isQuestion && $0.isOpen }.sorted { $0.createdAt < $1.createdAt }
+    }
+
     /// Answer a question: the daemon closes it and queues the answer to the asker, once,
     /// however many surfaces (this inbox, a Telegram reply) answer it.
     func answerQuestion(_ question: ChainHandoff, _ answer: String) {

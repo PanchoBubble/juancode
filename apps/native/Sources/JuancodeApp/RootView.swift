@@ -35,6 +35,7 @@ struct RootView: View {
                     // session-row hover menu; Tracked Issues into the sidebar;
                     // Appearance into the ⌘, Settings window. The Oracle has the
                     // right-edge rail and ⌃Space, so it does not need a slot here too.
+                    ChainQuestionsBadge()
                     RunningSessionsBadge()
                     NotificationsBell()
                     ToolsMenu()
