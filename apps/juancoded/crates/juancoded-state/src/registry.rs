@@ -1783,6 +1783,21 @@ impl SessionRegistry {
         })
     }
 
+    /// Record the session that dispatched this one, so a result its subscriber can no
+    /// longer receive can be walked up to the nearest running ancestor (juancode-25kc).
+    pub fn set_parent_session(&self, id: &str, parent: &str) -> bool {
+        let Some(live) = self.get(id) else {
+            return false;
+        };
+        self.edit_meta(id, &live, |meta| {
+            if meta.parent_session_id.as_deref() == Some(parent) {
+                return false;
+            }
+            meta.parent_session_id = Some(parent.to_string());
+            true
+        })
+    }
+
     /// Write the parts of a session's row that belong to the person using it: its
     /// name and whether it is archived. Both optional, and an absent field is left
     /// alone — this is a patch, not a replacement, so a client that only has a rename

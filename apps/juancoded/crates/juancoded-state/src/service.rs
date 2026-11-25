@@ -200,6 +200,11 @@ pub trait SessionsApi: Send + Sync {
         false
     }
 
+    /// Record the session that dispatched this one. Defaulted like the one above.
+    fn set_parent_session(&self, _id: &str, _parent: &str) -> bool {
+        false
+    }
+
     /// Put a session to sleep: flag the row dormant, then kill the CLI tree.
     ///
     /// A method rather than two calls at each site, because the ORDER is the contract.
@@ -440,6 +445,10 @@ impl SessionsApi for SessionRegistry {
 
     fn set_prompt_delivery(&self, id: &str, delivery: PromptDelivery) -> bool {
         SessionRegistry::set_prompt_delivery(self, id, delivery)
+    }
+
+    fn set_parent_session(&self, id: &str, parent: &str) -> bool {
+        SessionRegistry::set_parent_session(self, id, parent)
     }
 
     fn publish_stuck(&self, id: &str, alert: StuckAlert) {

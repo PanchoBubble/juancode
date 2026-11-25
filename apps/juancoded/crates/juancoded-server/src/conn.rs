@@ -1098,6 +1098,13 @@ fn handle_client_message(
             match sessions.create(req) {
                 Ok(meta) => {
                     let id = meta.id.clone();
+                    // The dispatcher is the parent the notification outbox escalates to.
+                    let meta = match from_session_id.as_deref() {
+                        Some(from) if from != id && sessions.set_parent_session(&id, from) => {
+                            sessions.meta(&id).unwrap_or(meta)
+                        }
+                        _ => meta,
+                    };
                     // Before `created` goes out, so the chain frame the asker is sent
                     // behind it already lists the session it was just told about.
                     if let Some(chains) = chains {
@@ -4231,6 +4238,13 @@ mod tests {
                 .as_deref(),
             Some("auth-rewrite")
         );
+        // The dispatcher is recorded as parent, on the `created` row itself, so the
+        // notification outbox can walk a slept child up to it (juancode-25kc).
+        let parent_of = sent.iter().find_map(|f| match f {
+            ServerMessage::Created { session } => session.parent_session_id.clone(),
+            _ => None,
+        });
+        assert_eq!(parent_of.as_deref(), Some(oracle.as_str()));
         let role_of = |wire: &Wire, id: &str| {
             chain_book(wire).list()[0]
                 .members
