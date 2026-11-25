@@ -161,8 +161,8 @@ a PR.
 Cap at 4 concurrent (a live session is ~300MB and ~6% of a core), one task per
 dispatch, and give each a non-overlapping file lane in its prompt.
 
-Repo-specific wrappers: juancode's `dispatch-ticket` skill (bd tickets) builds on
-this one.
+Repo-specific wrappers: juancode's `dispatch-ticket` skill (bd tickets) and
+`run-loop` skill (`.claude/skills/run-loop/`, orchestrated epics) build on this one.
 
 ## Global installation
 
