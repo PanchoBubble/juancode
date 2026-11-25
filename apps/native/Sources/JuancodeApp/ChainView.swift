@@ -96,6 +96,7 @@ struct ChainOverviewView: View {
     let chain: Chain
     @State private var query = ""
     @AppStorage(ChainOverviewMode.storageKey) private var mode: ChainOverviewMode = .graph
+    @AppStorage("chainView.showNotes") private var showNotes = true
 
     /// Summed usage of the chain's sessions and its nested chains' (juancode-8oa5.12).
     private var chainUsage: SessionUsage? {
@@ -146,6 +147,12 @@ struct ChainOverviewView: View {
                 .fixedSize()
                 .help("Show the chain as connected cards or as a grouped list")
                 .accessibilityLabel("Chain view mode")
+                Toggle(isOn: $showNotes) { Image(systemName: "sidebar.right") }
+                    .toggleStyle(.button)
+                    .buttonStyle(.borderless)
+                    .help(showNotes ? "Hide notes" : "Show notes")
+                    .accessibilityLabel("Show notes")
+                    .clickCursor()
                 Menu {
                     if chain.isActive {
                         Button("Close Chain") { Task { await model.closeChain(chain.slug) } }
@@ -216,6 +223,14 @@ struct ChainOverviewView: View {
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.appSurface)
+        .safeAreaInset(edge: .trailing, spacing: 0) {
+            if showNotes {
+                HStack(spacing: 0) {
+                    Divider()
+                    ChainNotesPanel(chain: chain).frame(width: 300)
+                }
+            }
+        }
     }
 }
 

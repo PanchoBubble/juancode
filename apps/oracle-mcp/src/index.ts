@@ -81,6 +81,7 @@ import {
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
 import { defaultChainDeps, sessionChainTokens, watchChains } from "./chains.ts";
+import { chainNotesFor, postChainNote } from "./chain-notes.ts";
 import {
   registerNotificationTools,
   notificationSubscriber,
@@ -966,6 +967,43 @@ app.post("/api/heavy/cancel", (req: Request, res: Response) => {
     return;
   }
   res.json({ ok: true });
+});
+
+// Chain notes: agents post progress and read the user's requests (chain-notes.ts).
+app.post("/api/chain-notes", async (req: Request, res: Response) => {
+  const { chain, fromSessionId, text, kind, asHuman } = req.body ?? {};
+  if (
+    typeof text !== "string" ||
+    (chain !== undefined && typeof chain !== "string") ||
+    (fromSessionId !== undefined && typeof fromSessionId !== "string") ||
+    (kind !== undefined && kind !== "note" && kind !== "summary")
+  ) {
+    res.status(400).json({ ok: false, error: "text (string) is required; kind is note|summary" });
+    return;
+  }
+  try {
+    const { chain: c, note } = await postChainNote(defaultChainDeps(), {
+      chain,
+      fromSessionId,
+      text,
+      kind,
+      asHuman: asHuman === true,
+    });
+    res.json({ ok: true, chain: c.id ?? c.slug, note });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/chain-notes", async (req: Request, res: Response) => {
+  const chain = typeof req.query.chain === "string" ? req.query.chain : undefined;
+  const fromSessionId =
+    typeof req.query.fromSessionId === "string" ? req.query.fromSessionId : undefined;
+  try {
+    res.type("text/plain").send(await chainNotesFor(defaultChainDeps(), { chain, fromSessionId }));
+  } catch (err) {
+    res.status(400).type("text/plain").send(err instanceof Error ? err.message : String(err));
+  }
 });
 
 app.post("/api/dispatch", async (req: Request, res: Response) => {

@@ -18,6 +18,7 @@ import {
   type ChainDeps,
 } from "./chains.ts";
 import { ok, tool, type ToolResult } from "./tool-result.ts";
+import { chainNotesFor, postChainNote } from "./chain-notes.ts";
 
 const slug = z.string().min(1).describe("The chain UUID (or a legacy slug)");
 
@@ -132,5 +133,45 @@ export function registerChainTools(
       inputSchema: { slug },
     },
     answer((args) => chainClose(deps(), args.slug)),
+  );
+
+  const noteTarget = {
+    chain: z.string().optional().describe("The chain's UUID, slug or name"),
+    fromSessionId: z
+      .string()
+      .optional()
+      .describe(
+        "Or the session writing/reading: its juancode id, a unique prefix, or your CLI session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID). The chain is the one that session is in.",
+      ),
+  };
+
+  server.registerTool(
+    "chain_note",
+    {
+      title: "Add a note to a chain",
+      description:
+        "Append to a chain's notes, the running log the user reads beside the chain graph. kind 'note' (default) records a request, decision or finding so it is not lost while the swarm works; kind 'summary' replaces the chain's headline status — keep it short and current. asHuman marks it as written by the user (for relaying their words).",
+      inputSchema: {
+        ...noteTarget,
+        text: z.string().trim().min(1).max(8000),
+        kind: z.enum(["note", "summary"]).optional(),
+        asHuman: z.boolean().optional(),
+      },
+    },
+    answer(async (args) => {
+      const { chain, note } = await postChainNote(deps(), args);
+      return `Added ${note.kind} to "${chain.name ?? chain.slug}".`;
+    }),
+  );
+
+  server.registerTool(
+    "chain_notes",
+    {
+      title: "Read a chain's notes",
+      description:
+        "The chain's latest summary and its recent notes, oldest first. Read before starting or handing off work in a chain so the user's requests are seen.",
+      inputSchema: { ...noteTarget, limit: z.number().int().min(1).max(200).optional() },
+    },
+    answer((args) => chainNotesFor(deps(), args, args.limit)),
   );
 }

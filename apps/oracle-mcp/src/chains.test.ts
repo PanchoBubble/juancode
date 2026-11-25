@@ -82,6 +82,8 @@ describe("chain MCP tools", () => {
       "chain_close",
       "chain_create",
       "chain_list",
+      "chain_note",
+      "chain_notes",
       "chain_remove",
       "chain_show",
     ]);
