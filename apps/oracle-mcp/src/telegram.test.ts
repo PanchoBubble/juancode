@@ -543,6 +543,34 @@ describe("reply-to-notification routing", () => {
     expect(deps.chat).toHaveBeenCalledWith("hello", null, 100);
   });
 
+  it("answers a chain_ask question by closing its handoff, never typing into the pty", async () => {
+    const answer = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, op: "close", id: "h1" })
+      .mockResolvedValueOnce({ ok: false, op: "close", id: "h1", error: "handoff-closed" });
+    const deps = makeDeps({
+      outbound: {
+        record: vi.fn(async () => {}),
+        lookup: vi.fn(async () => ({
+          sessionId: "aaaa-1111",
+          title: "fix tests",
+          handoffId: "h1",
+        })),
+      },
+      answer,
+    });
+    const state = newBridgeState();
+    state.activity.set("aaaa-1111", "busy");
+    await handleUpdate(replyMsg("Option B", 33), allowed, deps, state);
+    await handleUpdate(replyMsg("Option A", 33), allowed, deps, state);
+    expect(answer).toHaveBeenNthCalledWith(1, "h1", "Option B");
+    // Delivery is the daemon's, on the close that wins: nothing reaches the pty from here.
+    expect(deps.deliver).not.toHaveBeenCalled();
+    expect(deps.queue).not.toHaveBeenCalled();
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("✅ Answered “fix tests”"));
+    expect(deps.send).toHaveBeenCalledWith(100, expect.stringContaining("already answered"));
+  });
+
   it("reports a delivery failure instead of throwing", async () => {
     const deps = makeDeps({
       outbound: {

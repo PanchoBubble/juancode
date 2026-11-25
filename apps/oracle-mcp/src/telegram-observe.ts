@@ -32,6 +32,8 @@ export interface OutboundRef {
   /** Session title at send time — used in confirmations without a re-fetch. */
   title: string;
   at: number;
+  /** Set when the message is a chain_ask question: a reply answers that handoff. */
+  handoffId?: string;
 }
 
 /** Newest-first cap on the outbound correlation log. */
@@ -125,7 +127,10 @@ export async function recordOutbound(ref: OutboundRef): Promise<void> {
 }
 
 /** Resolve a Telegram reply target back to the session the bot message was about. */
-export async function lookupOutbound(chatId: number, messageId: number): Promise<OutboundRef | null> {
+export async function lookupOutbound(
+  chatId: number,
+  messageId: number,
+): Promise<OutboundRef | null> {
   const all = await readJsonArray(outboundFile(), isOutbound);
   // Newest wins if the same message id were ever reused (Telegram ids are
   // per-chat monotonic, so this is just belt-and-braces).

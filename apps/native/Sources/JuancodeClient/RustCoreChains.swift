@@ -158,10 +158,17 @@ public struct ChainError: LocalizedError, Equatable {
     }
 }
 
-/// Chain handoffs over the wire (capability `chainHandoffs`, juancode-043.1). Read-only
-/// here (juancode-043.8): the history is subscribed to and mirrored whole; the write
-/// frames exist on the daemon, but no surface of this client sends them yet.
+/// Chain handoffs over the wire (capability `chainHandoffs`, juancode-043.1). The
+/// history is subscribed to and mirrored whole; the one write sent is `closeHandoff`,
+/// which answers a question to the human (juancode-8oa5.2).
 extension RustCoreClient {
+    // shortcut: fire-and-forget, the `handoffResult` is not awaited; the closed record's
+    // `handoff` frame is the confirmation. Await it if a refusal ever needs showing.
+    public func closeHandoff(_ id: String, reason: String) {
+        guard supports(.chainHandoffs) else { return }
+        connection.send(["type": "closeHandoff", "handoffId": id, "closureReason": reason])
+    }
+
     /// One subscription per connection, sent once and again after a reconnect.
     func ensureHandoffSubscription() {
         guard supports(.chainHandoffs) else { return }
@@ -206,7 +213,7 @@ extension RustCoreClient {
             guard let handoff = Self.decodeJSON(ChainHandoff.self, body["handoff"]) else { return }
             publishHandoffs { $0.upsert(handoff) }
         default:
-            // `handoffResult` answers a write, and this client sends none.
+            // `handoffResult` answers a write; `closeHandoff` does not wait for it.
             return
         }
     }

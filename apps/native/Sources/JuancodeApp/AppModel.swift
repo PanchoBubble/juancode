@@ -5738,6 +5738,19 @@ final class AppModel {
 
     var supportsChainHandoffs: Bool { core.supports(.chainHandoffs) }
 
+    /// `slug`'s unanswered chain_ask questions, oldest first (juancode-8oa5.2).
+    func openQuestions(in slug: String) -> [ChainHandoff] {
+        chainHandoffs.handoffs(in: slug).filter { $0.isQuestion && $0.isOpen }
+    }
+
+    /// Answer a question: the daemon closes it and queues the answer to the asker, once,
+    /// however many surfaces (this inbox, a Telegram reply) answer it.
+    func answerQuestion(_ question: ChainHandoff, _ answer: String) {
+        let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        core.closeHandoff(question.id, reason: text)
+    }
+
     private func subscribeHandoffsMirror() {
         guard handoffsCancel == nil else { return }
         handoffsCancel = core.subscribeHandoffs { [weak self] book in

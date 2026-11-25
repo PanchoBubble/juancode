@@ -589,6 +589,14 @@ final class WireProtocolTests: XCTestCase {
         XCTAssertEqual(handoff.target, .session("new"))
         XCTAssertEqual(handoff.summary, "the note")
         XCTAssertEqual(handoff.state, .pending)
+
+        guard case let .closeHandoff(id, reason, closeRequest) = try decode(#"""
+            {"type":"closeHandoff","requestId":"handoff-2","handoffId":"h1","closureReason":"Option B"}
+            """#)
+        else { return XCTFail("expected .closeHandoff") }
+        XCTAssertEqual(id, "h1")
+        XCTAssertEqual(reason, "Option B")
+        XCTAssertEqual(closeRequest, "handoff-2")
     }
 
     func testEncodesAChainWholeAndAResultThatSaysWhetherItHappened() throws {

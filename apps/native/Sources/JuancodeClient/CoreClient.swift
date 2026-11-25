@@ -280,6 +280,9 @@ public protocol CoreClient: AnyObject, Sendable {
     /// `chainHandoffs`). Each call is the whole history. Returns a cancel handle.
     func subscribeHandoffs(
         _ onBook: @escaping @Sendable (ChainHandoffBook) -> Void) -> @Sendable () -> Void
+    /// Close a handoff (wire `closeHandoff`). For a question to the human the reason is
+    /// the answer, and the daemon queues it to the asker (juancode-8oa5.2).
+    func closeHandoff(_ id: String, reason: String)
 
     // MARK: - The GitHub surface (capability: github)
 
@@ -436,6 +439,9 @@ public extension CoreClient {
         onBook(ChainHandoffBook())
         return {}
     }
+
+    /// Nothing to close on a core with no handoffs.
+    func closeHandoff(_ id: String, reason: String) {}
 
     /// What a core with no `github` capability does: refuse, by name.
     ///

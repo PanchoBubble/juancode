@@ -21,8 +21,8 @@ function deps(over: Partial<AskDeps> = {}) {
       handoffs.push(h);
       return { ok: true, op: "create", id: h.id };
     },
-    notify: async (_id, text) => {
-      pings.push(text);
+    notify: async (_id, text, handoffId) => {
+      pings.push(`${handoffId}:${text}`);
       return { chatIds: [1] };
     },
     newId: () => "h1",
@@ -42,7 +42,8 @@ describe("askHuman", () => {
       target: { kind: "human" },
     });
     expect(handoffs[0]!.summary).toContain("2. wait (recommended)");
-    expect(pings).toEqual([handoffs[0]!.summary]);
+    // The ping carries the handoff id, so a Telegram reply to it answers the question.
+    expect(pings).toEqual([`h1:${handoffs[0]!.summary}`]);
   });
 
   it("refuses a session outside a chain without writing or pinging", async () => {

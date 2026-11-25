@@ -29,7 +29,8 @@ export interface AskDeps {
   chainSlugOf: (sessionId: string) => string | null;
   supported: () => boolean;
   createHandoff: (handoff: HandoffInput) => Promise<HandoffResult>;
-  notify: (sessionId: string, text: string) => Promise<{ chatIds: number[] }>;
+  /** Ping the human; a reply to the ping answers `handoffId`. */
+  notify: (sessionId: string, text: string, handoffId: string) => Promise<{ chatIds: number[] }>;
   newId: () => string;
 }
 
@@ -38,7 +39,17 @@ export const defaultAskDeps: AskDeps = {
   chainSlugOf: (id) => chainForSession(id)?.slug ?? null,
   supported: supportsHandoffs,
   createHandoff,
-  notify: notifyOracleText,
+  notify: (sessionId, text, handoffId) =>
+    notifyOracleText(
+      sessionId,
+      text,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      handoffId,
+    ),
   newId: randomUUID,
 };
 
@@ -96,7 +107,7 @@ export async function handToHuman(
     summary: text,
   });
   if (!made.ok) throw new Error(`Could not record the question (${made.error ?? "unknown"}).`);
-  const sent = await deps.notify(source, text).then(
+  const sent = await deps.notify(source, text, id).then(
     (r) => r.chatIds.length,
     () => 0,
   );

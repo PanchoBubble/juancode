@@ -304,7 +304,10 @@ To ask the human a decision from inside a chain, use the `chain_ask` MCP tool or
 `POST /api/chain/ask` (`sessionId?`, `question`, `options` 2-4, `recommended`, `blocked`).
 It records a pending handoff from the asking session to the human (the same chain
 handoff record, visible in the chain graph) and pings Telegram once; a session outside a
-chain is refused (409 on HTTP) with nothing written.
+chain is refused (409 on HTTP) with nothing written. The human answers from the
+question inbox at the top of the native chain view or by replying to the Telegram ping;
+either closes the handoff with the answer as its reason, and the daemon queues the answer
+into the asker's session queue, once, for the close that wins.
 
 A finish ping goes out once per turn: a replayed settle is deduped, but once the session
 goes busy again, or a Telegram reply is delivered to it, its next finish pings again.

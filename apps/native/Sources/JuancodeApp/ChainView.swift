@@ -164,6 +164,8 @@ struct ChainOverviewView: View {
             .padding(.horizontal, 8).padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.08)))
 
+            ChainQuestionsInbox(slug: chain.slug)
+
             if mode == .graph && !chain.members.isEmpty {
                 ChainGraphView(chain: chain, query: query)
             } else if sections.isEmpty {
@@ -566,5 +568,66 @@ private struct ChainGoneCard: View {
         Text("This session no longer exists.")
             .font(.callout)
             .foregroundStyle(.secondary)
+    }
+}
+
+/// The chain's unanswered questions to you (chain_ask, juancode-8oa5.2), above the
+/// graph: each with its options as buttons and a free-text answer. Answering closes the
+/// question; the daemon queues the answer to the asking session.
+struct ChainQuestionsInbox: View {
+    @Environment(AppModel.self) private var model
+    let slug: String
+
+    var body: some View {
+        let questions = model.openQuestions(in: slug)
+        if !questions.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("\(questions.count) question\(questions.count == 1 ? "" : "s") for you",
+                      systemImage: "questionmark.bubble.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                ForEach(questions) { ChainQuestionCard(question: $0) }
+            }
+        }
+    }
+}
+
+private struct ChainQuestionCard: View {
+    @Environment(AppModel.self) private var model
+    let question: ChainHandoff
+    @State private var draft = ""
+
+    var body: some View {
+        let asker = question.source.sessionId.flatMap { id in model.sessions.first { $0.id == id }?.title }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(asker ?? "A session that no longer exists")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(question.summary)
+                .font(.system(size: 12))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                ForEach(question.questionOptions, id: \.self) { option in
+                    Button(option) { model.answerQuestion(question, option) }
+                        .help("Answer \u{201C}\(option)\u{201D}")
+                }
+            }
+            HStack(spacing: 6) {
+                TextField("Answer in your own words", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(send)
+                    .accessibilityLabel("Answer")
+                Button("Send", action: send)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
+    }
+
+    private func send() {
+        model.answerQuestion(question, draft)
+        draft = ""
     }
 }

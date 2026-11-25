@@ -25,7 +25,7 @@ use juancoded_cordis::contribution::ContributionRegistry;
 use juancoded_cordis::plugins::QueueChanged;
 use juancoded_cordis::services::queue::{Content, QueueApi, QueueError, QueueSnapshot};
 use juancoded_cordis::services::transcripts::{TranscriptAppended, TranscriptBatch};
-use juancoded_core::chain::ChainMemberKind;
+use juancoded_core::chain::{ChainMemberKind, HandoffOwner};
 use juancoded_core::heavy::HeavyQueueSnapshot;
 use juancoded_core::model::{now_ms, PromptDelivery, PromptDeliveryState, ProviderId};
 use juancoded_persistence::review_store::ReviewStore;
@@ -2229,6 +2229,20 @@ fn handle_client_message(
             let outcome = chains.map_or(Err("handoff-unavailable"), |engine| {
                 engine.close_handoff(&handoff_id, &reason)
             });
+            // A question to the human (chain_ask, juancode-8oa5.2) is answered by closing
+            // it: the answer goes to the asker through its queue, which lands it on the
+            // next idle and never over a draft. Only the call that closed it queues, so
+            // the native inbox and a Telegram reply racing each other deliver once.
+            if let (Ok(Some(closed)), Some(queue)) = (&outcome, queue) {
+                if let (HandoffOwner::Session(asker), HandoffOwner::Human) =
+                    (&closed.source, &closed.target)
+                {
+                    if sessions.meta(asker).is_some() {
+                        queue.enqueue(asker, Content::text(reason.clone()), "handoff");
+                    }
+                }
+            }
+            let outcome = outcome.map(|_| ());
             outbound.push(handoff_result(
                 "close",
                 Some(handoff_id),
@@ -3200,6 +3214,55 @@ mod tests {
 
         let heard = wire.forwarded(&watcher);
         assert_eq!(snapshots(&heard), vec![vec!["steer".to_string()]]);
+    }
+
+    #[tokio::test]
+    async fn answering_a_question_queues_it_to_the_asker_once() {
+        use juancoded_core::chain::{Handoff, HandoffDelivery, HandoffState};
+        let mut wire = Wire::new();
+        let mut fanout = fanout();
+        let asker = wire.session();
+        let chains = Arc::clone(wire.handles.chains.as_ref().unwrap());
+        chains.create("ask").unwrap();
+        chains
+            .create_handoff(Handoff {
+                id: "q1".into(),
+                chain_slug: "ask".into(),
+                source: HandoffOwner::Session(asker.clone()),
+                target: HandoffOwner::Human,
+                beads_issue: None,
+                summary: "❓ Which?".into(),
+                created_at: 0,
+                updated_at: 0,
+                state: HandoffState::Pending,
+                closure_reason: None,
+                predecessor_id: None,
+                successor_id: None,
+                evidence_ref: None,
+                delivery: HandoffDelivery::NotSent,
+            })
+            .unwrap();
+        let close = |reason: &str| ClientMessage::CloseHandoff {
+            handoff_id: "q1".into(),
+            reason: reason.into(),
+            request_id: None,
+        };
+        // Native inbox and Telegram racing with the same answer, then a different one.
+        wire.step(close("Option B"), &mut fanout);
+        wire.step(close("Option B"), &mut fanout);
+        let late = wire.step(close("Option A"), &mut fanout);
+        assert!(matches!(
+            late.as_slice(),
+            [ServerMessage::HandoffResult { error: Some(e), .. }] if e == "handoff-closed"
+        ));
+        let queued: Vec<String> = wire
+            .queue()
+            .snapshot(&asker)
+            .items
+            .iter()
+            .map(|o| o.content.as_text().unwrap_or("<keys>").to_string())
+            .collect();
+        assert_eq!(queued, vec!["Option B".to_string()]);
     }
 
     #[tokio::test]

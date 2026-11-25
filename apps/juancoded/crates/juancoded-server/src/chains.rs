@@ -230,8 +230,11 @@ impl Chains {
             return Err("handoff-not-found");
         }
         self.update_handoff(id, Some(HandoffState::Acknowledged), None, None)
+            .map(|_| ())
     }
-    pub fn close_handoff(&self, id: &str, reason: &str) -> Result<(), ChainRefusal> {
+    /// The closed record when this call is the one that closed it; `None` for a repeat
+    /// of the same close, so a caller acting on the close acts exactly once.
+    pub fn close_handoff(&self, id: &str, reason: &str) -> Result<Option<Handoff>, ChainRefusal> {
         if reason.trim().is_empty() {
             return Err("handoff-closure-reason-required");
         }
@@ -239,6 +242,7 @@ impl Chains {
     }
     pub fn mark_handoff_delivered(&self, id: &str) -> Result<(), ChainRefusal> {
         self.update_handoff(id, None, None, Some(HandoffDelivery::Sent))
+            .map(|_| ())
     }
 
     fn update_handoff(
@@ -247,7 +251,7 @@ impl Chains {
         state: Option<HandoffState>,
         reason: Option<&str>,
         delivery: Option<HandoffDelivery>,
-    ) -> Result<(), ChainRefusal> {
+    ) -> Result<Option<Handoff>, ChainRefusal> {
         let _book = self.lock();
         let current = self
             .store
@@ -258,12 +262,12 @@ impl Chains {
             .ok_or("handoff-not-found")?;
         if state == Some(HandoffState::Closed) && current.state == HandoffState::Closed {
             if reason == current.closure_reason.as_deref() {
-                return Ok(());
+                return Ok(None);
             }
             return Err("handoff-closed");
         }
         if delivery == Some(HandoffDelivery::Sent) && current.delivery == HandoffDelivery::Sent {
-            return Ok(());
+            return Ok(None);
         }
         if state.is_some() && current.state == HandoffState::Closed {
             return Err("handoff-closed");
@@ -280,8 +284,8 @@ impl Chains {
                     .into_iter()
                     .find(|h| h.id == id)
                     .ok_or("handoff-not-found")?;
-                let _ = self.changes.send(ChainChange::Handoff(h));
-                Ok(())
+                let _ = self.changes.send(ChainChange::Handoff(h.clone()));
+                Ok(Some(h))
             }
             Ok(false) => Err("handoff-not-found"),
             Err(e) => Err(store_failed(e)),

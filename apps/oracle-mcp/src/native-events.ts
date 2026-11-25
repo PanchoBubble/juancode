@@ -966,20 +966,30 @@ export function supportsSessionSleep(): boolean {
 
 /** Record a handoff. Silence is a failure, never a success. */
 export function createHandoff(handoff: HandoffInput): Promise<HandoffResult> {
+  return writeHandoff("create", { type: "createHandoff", handoff });
+}
+
+/** Close a handoff with `reason`. Closing a question to the human (chain_ask) with the
+ *  answer as reason is answering it: the daemon queues the answer to the asker, once. */
+export function closeHandoff(handoffId: string, reason: string): Promise<HandoffResult> {
+  return writeHandoff("close", { type: "closeHandoff", handoffId, closureReason: reason });
+}
+
+function writeHandoff(op: string, frame: Record<string, unknown>): Promise<HandoffResult> {
   if (!supportsHandoffs() || ws?.readyState !== WebSocket.OPEN) {
-    return Promise.resolve({ ok: false, op: "create", error: "handoff-unavailable" });
+    return Promise.resolve({ ok: false, op, error: "handoff-unavailable" });
   }
   const requestId = `handoff-${nextHandoffRequest++}`;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       handoffWrites.delete(requestId);
-      resolve({ ok: false, op: "create", error: "handoff-timeout" });
+      resolve({ ok: false, op, error: "handoff-timeout" });
     }, CHAIN_WRITE_TIMEOUT_MS);
     handoffWrites.set(requestId, (result) => {
       clearTimeout(timer);
       resolve(result);
     });
-    sendToNative({ type: "createHandoff", handoff, requestId });
+    sendToNative({ ...frame, requestId });
   });
 }
 

@@ -167,6 +167,10 @@ public enum ClientMessage: Sendable {
     /// `handoffResult` echoing `requestId`. The sidecar's session handoff writes one
     /// per handoff: old session → successor, the note as `summary`.
     case createHandoff(handoff: ChainHandoff, requestId: String?)
+    /// Close a handoff with `closureReason`, answered by a `handoffResult`. Closing a
+    /// question to the human (chain_ask) with the answer queues it to the asker, once
+    /// (juancode-8oa5.2).
+    case closeHandoff(handoffId: String, closureReason: String, requestId: String?)
     /// A well-formed message whose `type` this server doesn't implement — e.g. a
     /// newer client feature, or a TS-only message the embedded server doesn't
     /// support (`subscribeStructured`, `steerMessage`, …). Decoding degrades to
@@ -192,7 +196,7 @@ extension ClientMessage: Decodable {
         // Chains (juancode-dbo.1).
         case slug, kind, ref, title, url, name
         // Chain handoffs (juancode-u5q).
-        case handoff
+        case handoff, handoffId, closureReason
     }
 
     public init(from decoder: Decoder) throws {
@@ -329,6 +333,10 @@ extension ClientMessage: Decodable {
         case "createHandoff":
             self = .createHandoff(handoff: try c.decode(ChainHandoff.self, forKey: .handoff),
                                   requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
+        case "closeHandoff":
+            self = .closeHandoff(handoffId: try c.decode(String.self, forKey: .handoffId),
+                                 closureReason: try c.decode(String.self, forKey: .closureReason),
+                                 requestId: try c.decodeIfPresent(String.self, forKey: .requestId))
         default:
             // Degrade gracefully: a well-formed frame with an unrecognised `type`
             // is tolerated (a newer/other-server feature), not a decode error. Only

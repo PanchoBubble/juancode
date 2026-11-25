@@ -36,6 +36,7 @@ import {
   observerChats,
   recordOutbound,
   unobserveSession,
+  type OutboundRef,
 } from "./telegram-observe.ts";
 import {
   changesText,
@@ -62,16 +63,11 @@ import {
   type TriggerOrigin,
 } from "./dispatch-registry.ts";
 import { resolveObserverChatIds } from "./observer-trigger.ts";
-import {
-  deliverReply,
-  listSessions,
-  queueMessages,
-  sendKeys,
-  type ChatReply,
-} from "./oracle.ts";
+import { deliverReply, listSessions, queueMessages, sendKeys, type ChatReply } from "./oracle.ts";
 import { unknownKey, unknownKeyMessage } from "./keys.ts";
 import {
   attention,
+  closeHandoff,
   onSessionEvent,
   onSessionStuck,
   pauseAllSessions,
@@ -79,6 +75,7 @@ import {
   resumeAllSessions,
   supportsGlobalPause,
   onSessionUsage,
+  type HandoffResult,
   type SessionActivityEvent,
   type SessionStuckEvent,
   type SessionUsageSample,
@@ -355,8 +352,11 @@ export interface TelegramDeps {
     lookup: (
       chatId: number,
       messageId: number,
-    ) => Promise<{ sessionId: string; title: string } | null>;
+    ) => Promise<{ sessionId: string; title: string; handoffId?: string } | null>;
   };
+  /** Answer a chain_ask question by closing its handoff; the daemon queues the answer
+   *  to the asker. Optional so tests that never answer need not stub it. */
+  answer?: (handoffId: string, text: string) => Promise<HandoffResult>;
   /** The Telegram chat a dispatch originated from (dispatch-registry.ts), so a
    *  session event carrying a dispatchId notifies the chat that asked for the
    *  work — observer subscription or not. Null when unknown. */
@@ -412,6 +412,7 @@ function defaultDeps(token: string): TelegramDeps {
       chatsFor: observerChats,
     },
     outbound: { record: recordOutbound, lookup: lookupOutbound },
+    answer: closeHandoff,
     originChat: dispatchOriginChat,
     originTrigger: dispatchTriggerOrigin,
     deliver: deliverReply,
@@ -1028,6 +1029,10 @@ async function handleSessionReply(
 ): Promise<boolean> {
   const ref = await deps.outbound.lookup(chatId, replyTo);
   if (!ref) return false;
+  if (ref.handoffId && deps.answer) {
+    await answerQuestion(chatId, messageId, ref.handoffId, ref.title, text, deps);
+    return true;
+  }
   try {
     const busy = state.activity.get(ref.sessionId) === "busy";
     if (busy) await deps.queue(ref.sessionId, [text]);
@@ -1057,6 +1062,34 @@ async function handleSessionReply(
     );
   }
   return true;
+}
+
+/** A reply to a chain_ask question closes its handoff with the reply as the answer.
+ *  Never typed into the pty directly: the daemon queues it to the asker only for the
+ *  close that wins, so a native answer and this reply cannot both land. */
+async function answerQuestion(
+  chatId: number,
+  messageId: number | null,
+  handoffId: string,
+  title: string,
+  text: string,
+  deps: TelegramDeps,
+): Promise<void> {
+  const result = await deps.answer!(handoffId, text).catch(
+    (e: unknown): HandoffResult => ({
+      ok: false,
+      op: "close",
+      error: e instanceof Error ? e.message : String(e),
+    }),
+  );
+  if (result.ok) {
+    if (messageId !== null) await deps.react(chatId, messageId, "👍");
+    await deps.send(chatId, `✅ Answered “${title}” — it gets the answer when it next goes idle.`);
+  } else if (result.error === "handoff-closed") {
+    await deps.send(chatId, `ℹ️ That question to “${title}” was already answered.`);
+  } else {
+    await deps.send(chatId, `⚠️ Couldn't answer “${title}”: ${result.error ?? "unknown error"}`);
+  }
 }
 
 // ── Observer notifications ───────────────────────────────────────────────────
@@ -1530,13 +1563,9 @@ export async function notifyOracleText(
     sendMessage(config!.token, chatId, t),
   fetchSessions: () => Promise<unknown> = listSessions,
   resolveChats: () => Promise<number[]> = resolveObserverChatIds,
-  record: (ref: {
-    chatId: number;
-    messageId: number;
-    sessionId: string;
-    title: string;
-    at: number;
-  }) => Promise<void> = recordOutbound,
+  record: (ref: OutboundRef) => Promise<void> = recordOutbound,
+  /** A chain_ask question: a reply answers this handoff instead of following up. */
+  handoffId?: string,
 ): Promise<NotifyOracleResult> {
   if (!config) return { chatIds: [], title: sessionId.slice(0, 8) };
 
@@ -1552,14 +1581,24 @@ export async function notifyOracleText(
     // Native app unreachable — notify with the id slice rather than staying silent.
   }
   const header = project ? `${title} — ${project}` : title;
-  const body = `${header}\n${text}\n↩️ Reply to this message to send a follow-up to this session.`;
+  const footer = handoffId
+    ? "↩️ Reply to this message to answer."
+    : "↩️ Reply to this message to send a follow-up to this session.";
+  const body = `${header}\n${text}\n${footer}`;
 
   const chatIds = await resolveChats();
   for (const chatId of chatIds) {
     try {
       const mid = await send(chatId, body);
       if (mid !== null) {
-        await record({ chatId, messageId: mid, sessionId, title, at: Date.now() });
+        await record({
+          chatId,
+          messageId: mid,
+          sessionId,
+          title,
+          at: Date.now(),
+          ...(handoffId ? { handoffId } : {}),
+        });
       }
     } catch (e) {
       console.error("telegram oracle notify failed:", e instanceof Error ? e.message : e);

@@ -173,3 +173,23 @@ public struct ChainHandoffBook: Sendable, Equatable {
             .sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
     }
 }
+
+/// A question an agent asked the human through chain_ask (juancode-8oa5.1): a handoff
+/// from a session to the human, its summary written by `askText`
+/// (apps/oracle-mcp/src/chain-ask.ts). Closing it with the answer answers it.
+public extension ChainHandoff {
+    var isQuestion: Bool { target == .human && source.sessionId != nil }
+
+    /// The summary's numbered option lines (`1. yes (recommended)`), without the mark.
+    var questionOptions: [String] {
+        summary.split(separator: "\n").compactMap { line -> String? in
+            guard let dot = line.firstIndex(of: "."), dot > line.startIndex,
+                  line[..<dot].allSatisfy(\.isNumber) else { return nil }
+            let rest = line[line.index(after: dot)...]
+            guard rest.hasPrefix(" ") else { return nil }
+            var option = rest.dropFirst()
+            if option.hasSuffix(" (recommended)") { option = option.dropLast(" (recommended)".count) }
+            return option.isEmpty ? nil : String(option)
+        }
+    }
+}
