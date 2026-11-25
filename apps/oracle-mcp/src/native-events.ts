@@ -977,6 +977,12 @@ export function createHandoff(handoff: HandoffInput): Promise<HandoffResult> {
   return writeHandoff("create", { type: "createHandoff", handoff });
 }
 
+/** Acknowledge a handoff: its target says it took responsibility. Idempotent in the
+ *  daemon; refused (`handoff-closed`) once closed. */
+export function acknowledgeHandoff(handoffId: string): Promise<HandoffResult> {
+  return writeHandoff("acknowledge", { type: "acknowledgeHandoff", handoffId });
+}
+
 /** Close a handoff with `reason`. Closing a question to the human (chain_ask) with the
  *  answer as reason is answering it: the daemon queues the answer to the asker, once. */
 export function closeHandoff(handoffId: string, reason: string): Promise<HandoffResult> {

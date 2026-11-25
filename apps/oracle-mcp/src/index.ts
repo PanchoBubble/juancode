@@ -98,6 +98,7 @@ import {
 } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { askHuman } from "./chain-ask.ts";
+import { ackHandoff, closeChainHandoff, handOff } from "./chain-handoff.ts";
 import { isRole, ROLES } from "./roles.ts";
 import { registerChainTools } from "./chain-tools.ts";
 import { HandoffRefused, handOffSession, handoffSummary } from "./session-handoff.ts";
@@ -371,6 +372,69 @@ function buildServer(): McpServer {
       },
     },
     tool(async (args) => ok(await askHuman(args))),
+  );
+
+  server.registerTool(
+    "chain_handoff",
+    {
+      title: "Hand work to another session in your chain",
+      description:
+        "Pass responsibility to another session in your own chain: records a pending handoff from you to it; it takes over by calling chain_handoff_ack. Refuses, writing nothing, when you are not in a chain or the target is not in the same one. For the human use chain_ask.",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Your own juancode or CLI session id; inferred only for an unambiguous busy Oracle",
+          ),
+        to: z.string().min(1).describe("The receiving session's id (from oracle_list_sessions)"),
+        summary: z.string().trim().min(1).describe("What is handed over and what is expected"),
+        beadsIssue: z.string().trim().min(1).optional().describe("The beads id this is about"),
+      },
+    },
+    tool(async (args) => ok(await handOff(args))),
+  );
+
+  server.registerTool(
+    "chain_handoff_ack",
+    {
+      title: "Acknowledge a handoff",
+      description:
+        "Take responsibility for a handoff addressed to you. Refuses when it is not addressed to your session or is already closed.",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Your own juancode or CLI session id; inferred only for an unambiguous busy Oracle",
+          ),
+        handoffId: z.string().min(1),
+      },
+    },
+    tool(async (args) => ok(await ackHandoff(args))),
+  );
+
+  server.registerTool(
+    "chain_handoff_close",
+    {
+      title: "Close a handoff with evidence",
+      description:
+        "Close a handoff you sent or received. `evidence` is the recorded reason: what was done and where to verify it (a commit, a test run, a link).",
+      inputSchema: {
+        sessionId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Your own juancode or CLI session id; inferred only for an unambiguous busy Oracle",
+          ),
+        handoffId: z.string().min(1),
+        evidence: z.string().trim().min(1),
+      },
+    },
+    tool(async (args) => ok(await closeChainHandoff(args))),
   );
 
   server.registerTool(
