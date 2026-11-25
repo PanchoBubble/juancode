@@ -80,7 +80,7 @@ import {
   supportsHeavyQueue,
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
-import { watchChains } from "./chains.ts";
+import { defaultChainDeps, sessionChainTokens, watchChains } from "./chains.ts";
 import {
   registerNotificationTools,
   notificationSubscriber,
@@ -792,6 +792,21 @@ app.post("/api/chain/ask", async (req: Request, res: Response) => {
       blocked: str(b.blocked),
     });
     res.json({ ok: true, message });
+  } catch (e) {
+    res.status(409).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+// A loop's budget check (juancode-8oa5.12): tokens spent by the caller's chain and the
+// chains nested under it. 409 when the session is in no chain.
+app.get("/api/chain/tokens", async (req: Request, res: Response) => {
+  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId.trim() : "";
+  if (!sessionId) {
+    res.status(400).send("sessionId is required");
+    return;
+  }
+  try {
+    res.json({ ok: true, ...(await sessionChainTokens(defaultChainDeps(), sessionId)) });
   } catch (e) {
     res.status(409).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }

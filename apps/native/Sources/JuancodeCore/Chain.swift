@@ -138,6 +138,23 @@ public struct ChainBook: Sendable, Equatable {
         chains.filter { $0.parent == slug }
     }
 
+    /// Every session in `slug` and in each chain nested under it, however deep
+    /// (juancode-8oa5.12) — what the chain's token total sums. A parent cycle ends.
+    /// Mirrors `chainTokens` in the sidecar's chains.ts.
+    public func sessionRefs(under slug: String) -> Set<String> {
+        var seen: Set<String> = [], refs: Set<String> = [], queue = [slug]
+        while let at = queue.popLast() {
+            guard seen.insert(at).inserted else { continue }
+            for chain in chains {
+                if chain.slug == at {
+                    refs.formUnion(chain.members.filter { $0.kind == .session }.map(\.ref))
+                }
+                if chain.parent == at { queue.append(chain.slug) }
+            }
+        }
+        return refs
+    }
+
     /// The chain an item is in, if any.
     public func chain(of kind: ChainMemberKind, ref: String) -> Chain? {
         chains.first { $0.members.contains { $0.kind == kind && $0.ref == ref } }

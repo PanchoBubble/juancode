@@ -213,17 +213,21 @@ function memberLine(m: ChainMember, sessions: Map<string, SessionSummary>, deps:
 /** One chain with every member, grouped by kind; sessions carry their live status.
  *  The session list is best-effort: a chain is still worth showing without it. */
 export async function chainShowText(deps: ChainDeps, slug: string): Promise<string> {
-  const chain = (await readBook(deps)).find((c) => c.slug === slug);
+  const book = await readBook(deps);
+  const chain = book.find((c) => c.slug === slug);
   if (!chain) throw new Error(`No chain named "${slug}".`);
   const sessions = new Map<string, SessionSummary>();
   const chainHandoffs = deps.handoffs?.()?.some((h) => h.chainSlug === slug) ?? false;
-  if (chainHandoffs || chain.members.some((m) => m.kind === "session")) {
+  const nested = book.some((c) => c.parent === slug);
+  if (chainHandoffs || nested || chain.members.some((m) => m.kind === "session")) {
     for (const s of await deps.sessions().catch(() => [])) sessions.set(s.id, s);
   }
+  const tokens = chainTokens(book, slug, sessions);
   const head =
-    chain.state === "active"
+    (chain.state === "active"
       ? `${chain.name ?? chain.slug} · active since ${isoDate(chain.createdAt)}`
-      : `${chain.name ?? chain.slug} · closed ${chain.closedAt ? isoDate(chain.closedAt) : ""}`.trimEnd();
+      : `${chain.name ?? chain.slug} · closed ${chain.closedAt ? isoDate(chain.closedAt) : ""}`.trimEnd()) +
+    (tokens > 0 ? ` · ${tokens} tokens${nested ? " incl. nested chains" : ""}` : "");
   const groups = membersByKind(chain).map(
     ([kind, members]) =>
       `${KIND_LABELS[kind]} (${members.length}):\n` +
@@ -235,6 +239,48 @@ export async function chainShowText(deps: ChainDeps, slug: string): Promise<stri
     ...(groups.length > 0 ? groups : ["No members yet."]),
     ...(handoffText ? [handoffText] : []),
   ].join("\n\n");
+}
+
+/** Tokens spent by a chain's sessions and by every chain nested under it, however
+ *  deep (juancode-8oa5.12). A session with no usage yet counts 0. Mirrored by
+ *  `ChainBook.sessionRefs(under:)` in the native app. */
+export function chainTokens(
+  book: Chain[],
+  slug: string,
+  sessions: Map<string, SessionSummary>,
+): number {
+  const seen = new Set<string>();
+  const queue = [slug];
+  let total = 0;
+  while (queue.length > 0) {
+    const at = queue.pop()!;
+    if (seen.has(at)) continue; // a parent cycle must not loop forever
+    seen.add(at);
+    for (const c of book) {
+      if (c.slug === at) {
+        for (const m of c.members) {
+          if (m.kind === "session") total += sessions.get(m.ref)?.totalTokens ?? 0;
+        }
+      }
+      if (c.parent === at) queue.push(c.slug);
+    }
+  }
+  return total;
+}
+
+/** The token total of the chain `sessionId` is in, nested chains included — what a
+ *  loop's budget is checked against. Throws when the session is in no chain. */
+export async function sessionChainTokens(
+  deps: ChainDeps,
+  sessionId: string,
+): Promise<{ slug: string; totalTokens: number }> {
+  const book = await readBook(deps);
+  const chain = book.find((c) =>
+    c.members.some((m) => m.kind === "session" && m.ref === sessionId),
+  );
+  if (!chain) throw new Error(`Session ${sessionId} is in no chain.`);
+  const sessions = new Map((await deps.sessions()).map((s) => [s.id, s] as const));
+  return { slug: chain.slug, totalTokens: chainTokens(book, chain.slug, sessions) };
 }
 
 /** Where an open handoff stands, from what is known about its owner (juancode-043.3).

@@ -20,6 +20,8 @@ export interface SessionSummary {
   cliSessionId?: string;
   /** Put to sleep (resumable); present only when true. */
   dormant?: boolean;
+  /** Tokens the session has spent so far, when its transcript reported usage. */
+  totalTokens?: number;
 }
 
 /** Live activity as broadcast on the native WS (`activity` messages). */
@@ -51,6 +53,9 @@ export function parseSessionList(raw: unknown): SessionSummary[] {
         ? { cliSessionId: r.cliSessionId }
         : {}),
       ...(r.dormant === true ? { dormant: true } : {}),
+      ...(typeof (r.usage as { totalTokens?: unknown } | null)?.totalTokens === "number"
+        ? { totalTokens: (r.usage as { totalTokens: number }).totalTokens }
+        : {}),
     });
   }
   return out;

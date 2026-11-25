@@ -34,7 +34,8 @@ every dispatch — the role's duties live in `apps/oracle-mcp/src/roles.ts`, nev
 
 - A goal in free text → step 1 creates the epic.
 - An epic id → skip the planner if it already has open children; otherwise plan into it.
-- Optional: round cap `N`, concurrency, model overrides.
+- Optional: round cap `N`, concurrency, model overrides, and a **token budget** `B`
+  (see "Token budget").
 
 Set once: `SELF="${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-}}"`, `PROJECT` = the main
 checkout (dispatch-agents step 2), `SCRATCH` = your scratchpad. Keep the loop state —
@@ -58,8 +59,8 @@ checkout (dispatch-agents step 2), `SCRATCH` = your scratchpad. Keep the loop st
    sh -c 'bd ready --parent <epic> --json 2>&1 </dev/null'
    ```
 
-   For each ready ticket not already in flight, up to the concurrency cap, dispatch an
-   implementer (step 3). If nothing is ready and nothing is in flight: go to step 7.
+   With a budget, check it first (see "Token budget"). For each ready ticket not already
+   in flight, up to the concurrency cap, dispatch an implementer (step 3). If nothing is ready and nothing is in flight: go to step 7.
 
 3. **Implement.** Claim the ticket (`bd update <id> --status in_progress`). Prompt =
    dispatch-ticket's conventions block with `<ID>` filled in, plus "Leave the ticket open
@@ -102,6 +103,23 @@ checkout (dispatch-agents step 2), `SCRATCH` = your scratchpad. Keep the loop st
 7. **Finish.** When `bd ready --parent <epic>` is empty and nothing is in flight, list
    the epic's children (`bd list --parent <epic> --all`). All closed → close the epic.
    Anything else is blocked on a question or a dependency; say which.
+
+## Token budget
+
+Optional, set at loop start. Before every dispatch (planner, implementer or tester),
+read what your chain has spent — its sessions plus every nested chain's:
+
+```bash
+curl -s -m 10 "http://127.0.0.1:4281/api/chain/tokens?sessionId=$SELF"   # {"slug":…,"totalTokens":…}
+```
+
+Under `B`: dispatch. At or over `B`, and only the first time: stop dispatching, raise
+**one** `chain_ask` (step 6's call) — question "`<epic>` has spent `<total>` tokens of
+its `<B>` budget. Continue?", options like `"Raise the budget to …"`, `"Finish the
+in-flight tickets, then stop"`, `"Stop now"`, blocked `"new dispatches for <epic>"`.
+Remember that you asked; do not ask again while it is open. Running children are left
+alone — they finish and report as usual (retire them as usual); nothing is killed. The
+answer arrives as your next input: a raised budget becomes the new `B`.
 
 ## Retire a child
 

@@ -97,6 +97,12 @@ struct ChainOverviewView: View {
     @State private var query = ""
     @AppStorage(ChainOverviewMode.storageKey) private var mode: ChainOverviewMode = .graph
 
+    /// Summed usage of the chain's sessions and its nested chains' (juancode-8oa5.12).
+    private var chainUsage: SessionUsage? {
+        let refs = model.chains.sessionRefs(under: chain.slug)
+        return model.sessions.filter { refs.contains($0.id) }.aggregateUsage()
+    }
+
     var body: some View {
         let rows = model.chainDetailRows(chain)
         let sections = ChainDetail.sections(rows, query: query)
@@ -111,6 +117,11 @@ struct ChainOverviewView: View {
                         Text("\(chain.members.count) member\(chain.members.count == 1 ? "" : "s")")
                         Text("·")
                         Text(chain.isActive ? "Started \(relativeTime(chain.createdAt))" : "Closed \(chain.closedAt.map(relativeTime) ?? "")")
+                        if let usage = chainUsage?.badgeLabel {
+                            Text("·")
+                            Text(usage)
+                                .help("Tokens spent by this chain's sessions and its nested chains' sessions")
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)

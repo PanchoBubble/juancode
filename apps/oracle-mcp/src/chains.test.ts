@@ -3,10 +3,17 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerChainTools } from "./chain-tools.ts";
-import { chainListText, membersByKind, readBook, resolveMemberRef } from "./chains.ts";
+import {
+  chainListText,
+  chainTokens,
+  membersByKind,
+  readBook,
+  resolveMemberRef,
+  sessionChainTokens,
+} from "./chains.ts";
 import { fakeChainDeps, type FakeChainDeps } from "./chains-fake.ts";
 import type { Chain, Handoff } from "./native-events.ts";
-import type { SessionSummary } from "./telegram-format.ts";
+import { parseSessionList, type SessionSummary } from "./telegram-format.ts";
 
 const session = (id: string, title: string, status = "running"): SessionSummary => ({
   id,
@@ -111,6 +118,40 @@ describe("chain MCP tools", () => {
         "Beads issues (1):\n- juancode-dbo.10 · chain tools",
         "Linear tickets (1):\n- ENG-7\n    https://linear.app/x/ENG-7",
       ].join("\n\n"),
+    );
+  });
+
+  it("a chain's token total sums its sessions and every nested chain's, once (juancode-8oa5.12)", async () => {
+    const sessions = parseSessionList([
+      { id: "orch", usage: { totalTokens: 100 } },
+      { id: "impl", usage: { totalTokens: 20 } },
+      { id: "deep", usage: { totalTokens: 3 } },
+      { id: "fresh" },
+    ]);
+    const chain = (slug: string, refs: string[], parent?: string): Chain => ({
+      slug,
+      state: "active",
+      createdAt: 1,
+      closedAt: null,
+      members: refs.map((ref, i) => ({ kind: "session", ref, addedAt: i })),
+      ...(parent ? { parent } : {}),
+    });
+    // "loop" -> "sub" -> "subsub" -> back to "loop": a parent cycle must still end.
+    const book = [
+      chain("loop", ["orch", "fresh"], "subsub"),
+      chain("sub", ["impl"], "loop"),
+      chain("subsub", ["deep"], "sub"),
+      chain("other", ["gone"]),
+    ];
+    const bySession = new Map(sessions.map((s) => [s.id, s] as const));
+    expect(chainTokens(book, "sub", bySession)).toBe(123);
+    expect(chainTokens(book, "other", bySession)).toBe(0);
+    const deps = fakeChainDeps({ book: book.slice(1).concat(chain("loop", ["orch"])), sessions });
+    expect(await sessionChainTokens(deps, "orch")).toEqual({ slug: "loop", totalTokens: 123 });
+    await expect(sessionChainTokens(deps, "nobody")).rejects.toThrow(/in no chain/);
+    const { text } = await (await connect(deps))("chain_show", { slug: "loop" });
+    expect(text.split("\n")[0]).toBe(
+      "loop · active since 1970-01-01 · 123 tokens incl. nested chains",
     );
   });
 
