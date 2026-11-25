@@ -8,22 +8,15 @@ description: Dispatch a bd (beads) ticket to a fresh, autonomous agent session t
 Hand a bd ticket to a **separate, autonomous agent session** that implements it
 end-to-end, then commits and pushes. This keeps the _current_ session's context free.
 
-The dispatch goes through the Oracle (`POST 127.0.0.1:4281/api/dispatch`), so the
-session is a real CLI pty in the native app: visible in the grid, steerable from
-Telegram, isolated in its own git worktree. The generic mechanics (preflight, repo
-resolution, worktree flag, follow-up endpoints, concurrency cap) live in the
-user-scope **dispatch-agents** skill — read it if anything below is unclear. This
-skill is the bd-ticket-shaped wrapper around it. Its source is tracked here at
-`.claude/user-skills/dispatch-agents/` (outside `.claude/skills/`, so it is not also
-a project skill); install it with
-`ln -s "$PWD/.claude/user-skills/dispatch-agents" ~/.claude/skills/dispatch-agents`.
-Codex uses the same source linked at `~/.agents/skills/dispatch-agents`. Follow its
-provider-choice rules: default to your own provider, honor the user's choice, and
-allow a justified switch. Set `DISPATCH_PROVIDER` to that choice; do not hardcode Claude.
+The mechanics (preflight, worktree flag, provider choice, model table, response states,
+notifications, concurrency cap) live in the **dispatch-agents** skill (source:
+`.claude/user-skills/dispatch-agents/`; install steps are in it). Read it; this skill only
+adds the bd-ticket specifics. Set `DISPATCH_PROVIDER` as it says; do not hardcode Claude.
 
 **Prime directive of this repo:** never inject a shadow HOME/CODEX_HOME or override
 mcpServers — the dispatched CLI inherits the environment untouched, exactly like a
-normal terminal. Do not pass `--model`.
+normal terminal. Pick `model` from the dispatch-agents **Model by role** table (the only
+place those defaults live); never pass CLI flags.
 
 ## Arguments
 
@@ -39,7 +32,7 @@ or run `bd ready` and offer the top items. Never guess an id.
    sh -c 'bd show <id> 2>&1 </dev/null'
    ```
 
-   Confirm it exists and read its title + description. Abort if it's already
+   Confirm it exists and read its status. Abort if it's already
    `closed` (tell the user) or `in_progress` under another owner. Also check the
    ticket isn't already landed on `origin/main` — a parallel session may have shipped
    it.
@@ -50,39 +43,33 @@ or run `bd ready` and offer the top items. Never guess an id.
    sh -c 'bd update <id> --status in_progress --json >/dev/null 2>&1 </dev/null'
    ```
 
-3. **Preflight the Oracle** (one call):
+3. **Preflight** the Oracle as dispatch-agents describes (sidecar down: `pnpm dev:oracle`).
 
-   ```bash
-   curl -s -m 2 http://127.0.0.1:4281/healthz && curl -s -m 2 http://127.0.0.1:4280/presence
-   ```
-
-   Sidecar (4281) dead → start it with `pnpm dev:oracle` and stop. Native app (4280)
-   dead → the dispatch is durably queued and starts on next launch; say so.
-
-4. **Build the task prompt** — write it to the scratchpad (NOT into the repo). It
-   must be self-contained (the dispatched session has fresh context). Include:
-   - The ticket id, title, and full description (paste from step 1).
-   - The **juancode conventions block** below, verbatim.
-   - The **finish-line policy** (see "Autonomy" — default: commit + push to main).
-
-   Write with a real heredoc (real newlines, not `\n`):
+4. **Build the task prompt** in the scratchpad (NOT the repo). Do not paste the
+   ticket: the child runs `bd show <id>` itself. The prompt is the **juancode
+   conventions block** below with `<ID>` filled in, plus only what the ticket does
+   not say (decisions made, files other sessions are editing, a lane restriction, a
+   PR-instead-of-push finish line from "Autonomy"). Keep the first line's
+   "Implement bd ticket <ID> end-to-end" wording; the dispatch guard reads the id
+   from it.
 
    ```bash
    cat > "$SCRATCH/dispatch-<id>.txt" <<'PROMPT'
-   <the full prompt>
+   <the block, plus extras>
    PROMPT
    ```
 
    (`$SCRATCH` = the session scratchpad dir from the system prompt.)
 
-5. **Dispatch** it — `jq -Rs` handles the quoting, so the prompt can contain anything:
+5. **Dispatch** it — `jq` handles the quoting, so the prompt can contain anything:
 
    ```bash
    jq -n --arg project "$(git rev-parse --show-toplevel)" --arg ticket "<id>" \
          --arg provider "$DISPATCH_PROVIDER" \
+         --arg model "<model from the role table>" \
          --arg from "${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-}}" \
          --rawfile prompt "$SCRATCH/dispatch-<id>.txt" \
-     '{project:$project, prompt:$prompt, provider:$provider, worktree:true, ticket:$ticket, fromSessionId:$from}' \
+     '{project:$project, prompt:$prompt, provider:$provider, model:$model, worktree:true, ticket:$ticket, fromSessionId:$from}' \
      | curl -s -m 30 -X POST http://127.0.0.1:4281/api/dispatch \
          -H 'content-type: application/json' --data-binary @-
    ```
@@ -93,7 +80,9 @@ or run `bd ready` and offer the top items. Never guess an id.
 
    The response is the truth. Read `state`, and read it as accepted-or-not:
 
-   - `"state":"started"` + `sessionId` → really running.
+   - `"state":"started"` + `sessionId` → session created (not proof it is working;
+     check the exact id in `GET :4281/api/sessions` and its screen/transcript before
+     saying so).
    - `"state":"queued"` → **accepted**, the app just didn't ack in time; it starts by
      itself. This is NOT a failure and NOT something to post again.
    - `"state":"duplicate"` → this was already dispatched; `dispatchId` is the one that
@@ -102,13 +91,8 @@ or run `bd ready` and offer the top items. Never guess an id.
      it without asking.
    - `ok:false` / another 4xx → a real failure (bad path, unknown provider). Report it.
 
-   **Never re-post a dispatch.** Re-posting a queued one is exactly how `juancode-h1an`
-   ended up with two agents racing on the same worktree removals. Keep the
-   `dispatchId` and wait on it (see Notes) instead.
-
-   The Oracle dispatches with permissions skipped, which is what makes the session
-   autonomous. `worktree:true` isolates it, so it never collides with this session or
-   the other agents in this tree.
+   **Never re-post a dispatch** (that is how `juancode-h1an` got two agents racing on
+   one worktree). Keep the `dispatchId` and wait on it (see Notes).
 
 6. **Report** to the user: which ticket was dispatched, the session id (or that it's
    queued and will start on its own), and the dispatch id. Do NOT also do the work yourself — it's dispatched.
@@ -120,51 +104,37 @@ or run `bd ready` and offer the top items. Never guess an id.
      -H 'content-type: application/json' -d '{"sessionId":"<id>"}'   # Telegram pings
    ```
 
-## juancode conventions block (embed verbatim in the prompt)
+## juancode conventions block (embed in the prompt, `<ID>` filled in)
+
+The child also loads this repo's AGENTS.md (gates, shipping, conventions), so this
+holds only what is easy to miss.
 
 ```
-You are an autonomous coding session on the juancode repo. You are in a FRESH GIT
-WORKTREE off it, so start by orienting: `pwd`, `git status -sb`, `git log --oneline -3`.
-Implement bd ticket <ID> end-to-end: investigate, implement, test, commit, push, close.
+You are an autonomous coding session on the juancode repo, in a FRESH GIT WORKTREE.
+Orient: `pwd`, `git status -sb`, `git log --oneline -3`.
+Implement bd ticket <ID> end-to-end: read it with `sh -c 'bd show <ID> 2>&1 </dev/null'`,
+then investigate, implement, test, commit, push, close.
 
-Repo shape: apps/native (SwiftUI macOS app that IS the server — Swift package, the
-primary surface), apps/juancoded (the Rust core port), apps/oracle-mcp (Node
-Telegram/phone sidecar; pnpm workspace, Node ≥22). There is no web app and no React.
+Easy to miss:
+- Wire protocol: apps/native/Sources/JuancodeServer/WireProtocol.swift and its
+  sidecar mirror apps/oracle-mcp/src/native-events.ts change together.
+- Never `Task.sleep(for:)` in apps/native (aborts the release app); use `Nap`.
+- Swift gate: `swift build --package-path apps/native` plus the narrowest
+  `swift test --package-path apps/native --filter <Suite>` (never the full suite;
+  `--skip-build` fakes a pass). Stale SourceKit "no such module" is noise.
+- TS gate: `~/.claude/bin/heavy pnpm typecheck|lint|test` (a hook refuses bare pnpm).
+- Leave no background process behind; no spin loops as load.
 
-Hard rules:
-- The WS wire protocol lives in apps/native/Sources/JuancodeServer/WireProtocol.swift;
-  the sidecar's client mirror is apps/oracle-mcp/src/native-events.ts — keep them in
-  sync when touching either.
-- TypeScript: verbatimModuleSyntax is on — use `import type` for type-only imports.
-- Never use `Task.sleep(for:)` in apps/native — it aborts the release app; use `Nap`.
-- Use real newlines in generated content. Prefer extracting shared logic over
-  duplicating. Prime directive: never inject a shadow HOME/CODEX_HOME or override
-  mcpServers.
+Finish line:
+- `git config user.name` must be "JuanOne". Stage ONLY your files by explicit path
+  (the tree is live-edited by other sessions). In the commit body (not code
+  comments) reference <ID>; no `Co-Authored-By` trailer.
+- `git pull --rebase` && `git push` (ships to main, no PR unless asked); confirm
+  `git status` is up to date.
+- `sh -c 'bd close <ID> --reason "<summary incl. commit sha>" 2>&1 </dev/null'`.
+- Follow-ups: `sh -c 'bd create "..." --description="..." -t <type> -p <n> --deps discovered-from:<ID> --json </dev/null'`.
 
-Gates before done (run from repo root):
-- If Swift changed: `swift build --package-path apps/native` and the narrowest
-  `swift test --package-path apps/native --filter <Suite>` that covers your change
-  (never the full suite). `swift build --target` does NOT relink the xctest bundle,
-  and `--skip-build` runs a stale binary and fakes a pass. SourceKit "no such module"
-  diagnostics after edits are stale — the build is the source of truth.
-- TS: `pnpm typecheck`, `pnpm lint`, `pnpm test`. Wrap any pnpm/vitest command as
-  `~/.claude/bin/heavy pnpm ...` (a hook refuses it otherwise).
-- Never leave a background process behind, and never use a spin loop as load.
-
-Commit + push (finish line):
-- Verify `git config user.name` == "JuanOne" before committing.
-- Stage ONLY the files you changed — the tree is live-edited by other sessions;
-  never `git add -A`, add explicit paths.
-- Commit message references <ID> in the body, never in an inline code comment. It must
-  NOT contain any `Co-Authored-By: Claude` trailer and must be solely under the user's
-  identity.
-- Then: `git pull --rebase` && `git push`. Confirm `git status` is up to date with
-  origin. This repo ships straight to main — do NOT open a PR unless asked.
-- Close the ticket: `sh -c 'bd close <ID> --reason "<summary incl. commit sha>" 2>&1 </dev/null'`.
-- File any discovered follow-ups: `sh -c 'bd create "..." --description="..." -t <type> -p <n> --deps discovered-from:<ID> --json </dev/null'`.
-
-End your run by printing: the design, files changed, commit sha, gate results, and
-any follow-ups filed.
+End by printing: the design, files changed, commit sha, gate results, follow-ups filed.
 ```
 
 ## Autonomy (finish-line policy)
@@ -176,16 +146,7 @@ the PR. If "commit only", stop after a local branch commit and don't push.
 
 ## Notes
 
-- One ticket per dispatch (keeps the dispatched session's context tight).
-- With a parent `fromSessionId`, dispatch returns a `subscriptionId`. Completion,
-  questions, exits and failures arrive automatically in the parent's persisted
-  message queue, with a bounded assistant-output excerpt. End your turn and wait
-  for that notification; do not poll or launch a background wait. Subscriptions
-  survive sidecar restarts. Manage them with `oracle_session_subscriptions` and
-  `oracle_session_unsubscribe`.
-- If no parent could be identified and there is no `subscriptionId`, use
-  `curl -s 'http://127.0.0.1:4281/api/dispatches/<dispatchId>/wait?timeout=3600'`
-  as a background command (`run_in_background: true`), or observe on Telegram.
-  Never poll `/api/dispatches` in a sleep loop.
-- Several tickets at once: cap at 4 concurrent (a live session is ~300MB and ~6% of a
-  core) and give each one a non-overlapping file lane.
+- One ticket per dispatch; several at once follow the dispatch-agents cap and lanes.
+- With `fromSessionId` the response has a `subscriptionId`: results arrive in your
+  message queue; end your turn and wait. Otherwise use the dispatch-agents wait
+  command. Never poll in a sleep loop.

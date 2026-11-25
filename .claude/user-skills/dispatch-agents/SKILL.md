@@ -30,9 +30,21 @@ it supports rather than constructing CLI flags yourself.
   automatic routing and does not guarantee the parent's provider. Do not infer the
   provider from whichever session happens to be active in the app.
 
-Set `DISPATCH_PROVIDER` to that choice before using the examples below. Leave model
-selection to the sidecar unless the user specifies a model; then pass its `model`
-field together with the provider. `model:"default"` requests the CLI's own default.
+Set `DISPATCH_PROVIDER` to that choice before using the examples below.
+
+## Model by role (the one place these defaults live)
+
+Pass `model` explicitly, chosen by the child's role, and say which you chose and why.
+An explicit user choice wins. `model:"default"` requests the CLI's own default.
+
+| Role                                             | `claude` | `codex`                                    |
+| ------------------------------------------------ | -------- | ------------------------------------------ |
+| Planner, design, large or risky implementation   | `opus`   | `gpt-6.1-sol` (`gpt-6-astra` if demanding) |
+| Tester, small well-specified implementation      | `sonnet` | `gpt-6.1-sol`                              |
+| Read-only lookup (find, summarize, gather facts) | `haiku`  | `gpt-6-luna`                               |
+
+For `opencode` and `kimi` omit `model` (the CLI's own default). `dispatch-ticket` uses
+this table too.
 
 ## Procedure
 
@@ -55,8 +67,9 @@ field together with the provider. `model:"default"` requests the CLI's own defau
 
 3. **Write the prompt** to the session scratchpad (never into the repo). The new
    session has fresh context, so make it self-contained:
-   - The goal and acceptance criteria, in full — paste ticket text (Linear, bd, …)
-     rather than linking only.
+   - The goal and acceptance criteria. For a ticket the child can read itself (bd:
+     `bd show <id>`), pass the **id and only what the ticket lacks** — never paste the
+     body. Paste only when the child cannot fetch it (a Linear ticket, a chat request).
    - Relevant files, decisions already made, what's ruled out.
    - The finish line (see below).
    - "You are in a fresh git worktree; orient with `pwd`, `git status -sb`,
@@ -77,9 +90,10 @@ field together with the provider. `model:"default"` requests the CLI's own defau
    ```bash
    jq -n --arg project "<abs project path>" \
          --arg provider "$DISPATCH_PROVIDER" \
+         --arg model "<model from the role table>" \
          --arg from "${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-}}" \
          --rawfile prompt "$DISPATCH_SCRATCH/prompt.txt" \
-     '{project:$project, prompt:$prompt, provider:$provider, worktree:true, fromSessionId:$from}' \
+     '{project:$project, prompt:$prompt, provider:$provider, model:$model, worktree:true, fromSessionId:$from}' \
      | curl -s -m 30 -X POST http://127.0.0.1:4281/api/dispatch \
          -H 'content-type: application/json' --data-binary @-
    ```
@@ -94,7 +108,8 @@ field together with the provider. `model:"default"` requests the CLI's own defau
    ignored; do not guess another session's id. Remove the temporary prompt directory
    after the request has finished.
 
-   Read the response as accepted-or-not:
+   Read the response as accepted-or-not (an idle notification is not completion; read
+   the output and verify the finish line before reporting):
 
    - `"state":"started"` + `sessionId` → running.
    - `"state":"queued"` → **accepted**; it starts by itself. Not a failure.
@@ -147,8 +162,7 @@ this one.
 
 ## Global installation
 
-This directory is the shared source for both CLIs. From the main juancode checkout,
-install symlinks once so updates stay shared across all projects:
+Once, from the main juancode checkout (keep an existing link that already points here):
 
 ```bash
 mkdir -p "$HOME/.claude/skills" "$HOME/.agents/skills"
@@ -156,8 +170,4 @@ ln -s "$PWD/.claude/user-skills/dispatch-agents" "$HOME/.claude/skills/dispatch-
 ln -s "$PWD/.claude/user-skills/dispatch-agents" "$HOME/.agents/skills/dispatch-agents"
 ```
 
-Keep an existing link when it already points here; do not overwrite another skill.
-Add a short pointer in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`: dispatch requests
-use this skill and juancode sessions, default to the calling provider, and respect
-explicit provider choices or justified switches. Start a new CLI session after
-changing global instructions.
+Point `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` at this skill for dispatch requests.
