@@ -490,6 +490,56 @@ describe("durable session notifications", () => {
       ]);
     });
 
+    // juancode-8oa5.15: an orchestrator idles between child results, so the reaper
+    // must not sleep it while a dispatch child is still out.
+    it("keeps a subscriber with a running child off the reaper, so its result lands once", async () => {
+      const protect = vi.fn((_ids: string[]) => {});
+      const deliver = vi.fn(async (_id: string, _text: string) => {});
+      const toHuman = vi.fn(async (_item: unknown, _text: string) => {});
+      // The reaper's side: it sleeps an idle subscriber unless it is protected.
+      const live = new Map([
+        ["parent", { running: true }],
+        ["child", { running: true }],
+      ]);
+      const reap = () => {
+        if (!protect.mock.lastCall?.[0].includes("parent")) live.set("parent", { running: false });
+      };
+      const store = new SessionNotifications(":memory:", {
+        output: async () => "RESULT\nstatus: done",
+        deliver,
+        sessions: async () => live,
+        toHuman,
+        protect,
+      });
+      stores.push(store);
+      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      await store.publish(event("busy"));
+      reap();
+      await store.publish(event("exited"));
+      expect(toHuman).not.toHaveBeenCalled();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver.mock.calls[0]![0]).toBe("parent");
+      // The child finished: the parent is the reaper's again.
+      expect(protect).toHaveBeenLastCalledWith([]);
+    });
+
+    it("still escalates for a subscriber that exited while its child ran", async () => {
+      const protect = vi.fn((_ids: string[]) => {});
+      const toHuman = vi.fn(async (_item: unknown, _text: string) => {});
+      const store = new SessionNotifications(":memory:", {
+        output: async () => "done",
+        deliver: async () => {},
+        sessions: async () => new Map([["parent", { running: false }]]),
+        toHuman,
+        protect,
+      });
+      stores.push(store);
+      await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+      expect(protect).toHaveBeenLastCalledWith(["parent"]);
+      await store.publish(event("exited"));
+      expect(toHuman).toHaveBeenCalledTimes(1);
+    });
+
     it("escalates nothing while the core cannot list sessions", async () => {
       const { store, deliver, toHuman, sessions } = escalating({});
       sessions.mockRejectedValue(new Error("app down"));

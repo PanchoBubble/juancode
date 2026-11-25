@@ -9,7 +9,7 @@ import { listSessions, oracleDir } from "./oracle.ts";
 import { fetchMessages, type SessionMessage } from "./session-reads.ts";
 import { deliverSessionNotification } from "./notification-delivery.ts";
 import { extractResultBlock } from "./result-block.ts";
-import { chainForSession } from "./native-events.ts";
+import { chainForSession, protectFromReaper } from "./native-events.ts";
 import { notifyOracleText } from "./telegram.ts";
 import { defaultAskDeps, handToHuman } from "./chain-ask.ts";
 
@@ -81,12 +81,16 @@ interface NotificationDeps {
   sessions?: () => Promise<Map<string, SessionLiveness> | null>;
   /** Give the human a result nobody running can receive. Throws to retry later. */
   toHuman?: (item: SessionNotification, text: string) => Promise<void>;
+  /** The sessions the idle reaper must not sleep: an orchestrator idles between
+   *  child results, and a slept subscriber would push them to the human. */
+  protect?: (ids: string[]) => void;
 }
 
 export class SessionNotifications {
   private db: DatabaseSync;
   private work: Promise<unknown> = Promise.resolve();
   private warnedCycles = new Set<string>();
+  private guarded = "";
   constructor(
     path: string,
     private deps: NotificationDeps,
@@ -110,6 +114,23 @@ export class SessionNotifications {
       this.db.exec("ALTER TABLE subscriptions ADD COLUMN mode TEXT NOT NULL DEFAULT 'all'");
     if (!columns.some((c) => c.name === "response_includes"))
       this.db.exec("ALTER TABLE subscriptions ADD COLUMN response_includes TEXT");
+    this.guard();
+  }
+  /** Subscribers with a dispatch still out (a finished child retires its row) or a
+   *  result not yet delivered. Sent only when the set changes. */
+  private guard(): void {
+    if (!this.deps.protect) return;
+    const ids = this.db
+      .prepare(
+        `SELECT subscriber FROM subscriptions WHERE target_type = 'dispatch'
+         UNION SELECT subscriber FROM notifications WHERE delivered = 0 ORDER BY 1`,
+      )
+      .all()
+      .map((r) => String(r.subscriber));
+    const key = JSON.stringify(ids);
+    if (key === this.guarded) return;
+    this.guarded = key;
+    this.deps.protect(ids);
   }
   // Serialize asynchronous output reads, subscription changes and delivery so a
   // rapid busy/idle pair cannot reorder or lose transitions.
@@ -191,6 +212,7 @@ export class SessionNotifications {
           mode,
           responseIncludes,
         );
+      this.guard();
       return this.rows().find(
         (r) =>
           r.subscriber === subscriber && r.targetType === targetType && r.targetId === targetId,
@@ -205,7 +227,9 @@ export class SessionNotifications {
       this.db
         .prepare("DELETE FROM notifications WHERE subscription_id = ? AND delivered = 0")
         .run(id);
-      return this.db.prepare("DELETE FROM subscriptions WHERE id = ?").run(id).changes > 0;
+      const removed = this.db.prepare("DELETE FROM subscriptions WHERE id = ?").run(id).changes > 0;
+      this.guard();
+      return removed;
     });
   }
   /** A deleted session can neither receive nor produce notifications: drop every
@@ -220,7 +244,9 @@ export class SessionNotifications {
            OR subscription_id IN (SELECT id FROM subscriptions WHERE ${where}))`,
         )
         .run(id);
-      return Number(this.db.prepare(`DELETE FROM subscriptions WHERE ${where}`).run(id).changes);
+      const removed = this.db.prepare(`DELETE FROM subscriptions WHERE ${where}`).run(id).changes;
+      this.guard();
+      return Number(removed);
     });
   }
   private advance(row: SessionSubscription, event: NotificationEvent, finished: boolean): void {
@@ -394,6 +420,7 @@ export class SessionNotifications {
     }
     this.db.exec(`DELETE FROM notifications WHERE delivered = 1 AND rowid NOT IN
       (SELECT rowid FROM notifications WHERE delivered = 1 ORDER BY rowid DESC LIMIT 500)`);
+    this.guard();
   }
   retry(): Promise<void> {
     return this.serial(() => this.flushPending());
@@ -447,6 +474,7 @@ export function sessionNotifications(): SessionNotifications {
           });
       return out;
     },
+    protect: protectFromReaper,
     toHuman: async (item, text) => {
       // The child is the handoff's source; its chain, else the subscriber's.
       const chainSlugOf = (id: string) =>

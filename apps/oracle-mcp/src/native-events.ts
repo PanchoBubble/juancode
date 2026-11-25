@@ -1096,6 +1096,14 @@ function settleChainWrite(msg: Record<string, unknown>): void {
   settle(result);
 }
 
+let reaperProtected: string[] = [];
+/** Replace this client's set of sessions the core's idle reaper must not sleep. The
+ *  core drops it with the connection, so a reconnect sends it again. */
+export function protectFromReaper(ids: string[]): void {
+  reaperProtected = ids;
+  sendToNative({ type: "setReaperProtectedIds", sessionIds: ids });
+}
+
 function sendToNative(msg: Record<string, unknown>): void {
   if (ws?.readyState === WebSocket.OPEN) {
     try {
@@ -1214,6 +1222,8 @@ function handleMessage(raw: string): void {
     // Re-subscribe to the chains after a reconnect, once the handshake says the
     // endpoint has them, and only when something is watching.
     if (chainsListeners.length > 0) subscribeChains();
+    if (reaperProtected.length > 0)
+      sendToNative({ type: "setReaperProtectedIds", sessionIds: reaperProtected });
     return;
   }
   if (msg.type === "chainResult") {
