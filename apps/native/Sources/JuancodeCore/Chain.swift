@@ -157,14 +157,24 @@ public struct ChainBook: Sendable, Equatable {
         chain.parent.map { self[$0] != nil } ?? false
     }
 
+    /// Active chains the rail draws at top level in its active section: those not nested
+    /// under an active parent. An active child of a closed parent surfaces here too
+    /// (juancode-a02s), so it is listed and its attention reaches the queue total.
+    public var activeRoots: [Chain] {
+        active.filter { chain in chain.parent.flatMap { self[$0] }?.isActive != true }
+    }
+
     /// `roots` with every chain nested under each, depth first, children oldest first,
     /// each with its depth: the rail's outline (juancode-i38u). A parent cycle ends.
+    /// A closed chain leaves out its active children: those surface as `activeRoots`.
     public func outline(_ roots: [Chain]) -> [(chain: Chain, depth: Int)] {
         var seen: Set<String> = [], out: [(chain: Chain, depth: Int)] = []
         func walk(_ chain: Chain, _ depth: Int) {
             guard seen.insert(chain.slug).inserted else { return }
             out.append((chain, depth))
-            for child in children(of: chain.slug) { walk(child, depth + 1) }
+            for child in children(of: chain.slug) where chain.isActive || !child.isActive {
+                walk(child, depth + 1)
+            }
         }
         for root in roots { walk(root, 0) }
         return out

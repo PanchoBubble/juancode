@@ -13,7 +13,7 @@ struct ChainsRailPanel: View {
 
     var body: some View {
         // Nested chains sit under their parent, whose row counts their attention too.
-        let active = model.chains.outline(model.chains.active.filter { !model.chains.isNested($0) })
+        let active = model.chains.outline(model.chains.activeRoots)
         let inactive = model.chains.outline(model.chains.inactive.filter { !model.chains.isNested($0) })
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {

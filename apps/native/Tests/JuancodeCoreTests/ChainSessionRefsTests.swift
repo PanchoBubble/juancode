@@ -35,6 +35,12 @@ import Testing
         #expect(attention.waitingInput == 2)
         let roots = book.chains.filter { !book.isNested($0) }
         #expect(book.outline(roots).map { "\($0.chain.slug):\($0.depth)" } == ["loop:0", "sub:1", "subsub:2", "orphan:0"])
+        // juancode-a02s: an active child of a closed parent is an active root, once.
+        var closedParent = chain("old", ["p"]); closedParent.state = .inactive
+        let split = ChainBook([closedParent, chain("live", ["l"], parent: "old"), chain("kid", ["k"], parent: "live")])
+        #expect(split.activeRoots.map(\.slug) == ["live"])
+        #expect(split.outline(split.activeRoots).map(\.chain.slug) == ["live", "kid"])
+        #expect(split.outline(split.inactive.filter { !split.isNested($0) }).map(\.chain.slug) == ["old"])
         let cyclic = ChainBook([chain("a", [], parent: "b"), chain("b", [], parent: "a")])
         #expect(cyclic.subtree(of: "a").map(\.slug) == ["a", "b"])
     }
