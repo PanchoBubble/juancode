@@ -712,7 +712,7 @@ private struct SidebarColumn: View {
             .toolbar {
                 ToolbarItem { SidebarActionsMenu() }
             }
-            .navigationTitle("juancode")
+            .navigationTitle(Config.windowTitle)
             .environment(bridge)
     }
 }

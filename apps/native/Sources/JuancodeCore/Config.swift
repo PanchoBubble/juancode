@@ -11,6 +11,13 @@ public enum Config {
         env["JUANCODE_PORT"].flatMap(Int.init) ?? 4280
     }
 
+    /// Window title: "juancode", or "juancode @ <host>" when `scripts/remote.sh`
+    /// points this instance at another Mac's daemon, so you never type into the wrong one.
+    public static var windowTitle: String {
+        let remote = (env["JUANCODE_REMOTE_NAME"] ?? "").trimmingCharacters(in: .whitespaces)
+        return remote.isEmpty ? "juancode" : "juancode @ \(remote)"
+    }
+
     /// Host the embedded server binds to (`JUANCODE_HOST`, default `127.0.0.1`).
     ///
     /// Loopback is the secure default: the server is reachable only from this Mac,

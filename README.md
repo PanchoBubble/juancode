@@ -101,6 +101,19 @@ The sidecar also serves a small phone web console; expose it with a tunnel
 (Cloudflare Tunnel or Tailscale) and put Cloudflare Access / a token in front of
 it. See [apps/oracle-mcp/README.md](./apps/oracle-mcp/README.md) for the details.
 
+## Drive another Mac
+
+Sessions on another Mac run there, with its CLIs, logins and subscriptions; this Mac
+only shows and steers them. On the other Mac: install juancode, run
+`pnpm daemon:agent install`, and turn on Remote Login. Then, here:
+
+```bash
+pnpm remote other-mac.local     # SSH tunnel + a second window titled "juancode @ other-mac.local"
+```
+
+Quit that window to close the tunnel. Its daemon stays on loopback with no auth, so the
+connection only ever goes through SSH.
+
 ## Configuration
 
 | Env var                         | Default                 | Purpose                                               |
