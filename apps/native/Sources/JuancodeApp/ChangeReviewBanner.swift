@@ -1,11 +1,10 @@
 import JuancodeCore
 import SwiftUI
 
-/// An unobtrusive "review the agent's changes" nudge floated over the bottom of a
-/// session's terminal once the agent settles a turn with unreviewed changes in a
-/// dirty tree. Clicking it (or the sidebar badge, or ⌥⌘C) opens the Changes panel on
-/// the working tree. It floats as an overlay so it never reflows the pty grid — the
-/// terminal render stays intact.
+/// An unobtrusive "review the agent's changes" nudge in the session top bar once the
+/// agent settles a turn with unreviewed changes in a dirty tree. Clicking it (or the
+/// sidebar badge, or ⌥⌘C) opens the Changes panel on the working tree. It lives in
+/// the bar, not over the terminal, so it never covers the CLI's own last line.
 struct ChangeReviewBanner: View {
     let counts: DiffCounts
     let onOpen: () -> Void
@@ -22,10 +21,9 @@ struct ChangeReviewBanner: View {
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Color.accentColor.opacity(0.25), in: Capsule())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(.black.opacity(0.55), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(Color.accentColor.opacity(0.18), in: Capsule())
             .foregroundStyle(Color.accentColor)
         }
         .buttonStyle(.plain)

@@ -1599,7 +1599,7 @@ struct SidebarView: View {
                             action: @escaping () -> Void) -> some View {
         Button { withAnimation(.easeOut(duration: 0.18)) { action() } } label: {
             Label(title, systemImage: systemImage)
-                .font(.system(size: 11))
+                .font(.system(size: 12))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, SidebarRowChrome.vertical)
                 .contentShape(Rectangle())
@@ -2117,6 +2117,12 @@ private struct FolderHeader: View {
     /// Whether this folder has a bd tracker, so the header offers its board.
     private var hasBeads: Bool { model.beads(group.cwd)?.available == true }
 
+    /// Header buttons are drawn only while wanted; see the line-1 overlay.
+    private var showsActions: Bool {
+        headerHovering || showingAgentPicker || showingProjectMenu || showingRunEditor
+            || model.panelNavigation.isFocused(.sessions, row: "folder:" + group.cwd)
+    }
+
     /// Whether the metadata line has any signal. Keeps an idle folder a single line.
     private var showsMeta: Bool {
         group.running > 0 || unreadCount > 0
@@ -2151,186 +2157,198 @@ private struct FolderHeader: View {
                 .hintTarget(toggle)
                 // Hover lights the whole bar (below), not a rounded chip on the name.
                 .pointerCursor()
-                // A popover (not a native Menu) so each agent option is a real SwiftUI
-                // button: it gets the pointing-hand cursor + hover highlight, and clicks
-                // register reliably (native menu rows did neither).
-                Button {
-                    // Re-ask for the folder's git state as the popover opens: the
-                    // "New worktree" switch below is drawn from it, and the answer
-                    // this header got on appear may be missing (the core was busy,
-                    // or still starting). Coalesced and rate-limited in the model.
-                    model.loadFolderGitState(group.cwd)
-                    showingAgentPicker = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                        .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.appHairline(plusHovering ? 0.14 : 0)))
-                }
-                .buttonStyle(.plain)
-                .help("New session in \(group.cwd)")
-                .hintTarget {
-                    model.loadFolderGitState(group.cwd)
-                    showingAgentPicker = true
-                }
-                .clickCursor()
-                .onHover { plusHovering = $0 }
-                .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        // Shown unless git has answered "not a repo": while the state is
-                        // still loading, hiding the worktree half would look like the
-                        // folder has no worktree choice at all.
-                        if model.folderGitState(group.cwd)?.git != false {
-                            // Per-project worktree default. The rows below each say where
-                            // they start, so this only decides what ⌘N does. Persisted per
-                            // project, falling back to Settings → Sessions.
-                            Toggle(isOn: Binding(
-                                get: { model.worktreeDefault(forProject: group.cwd) },
-                                set: { model.setWorktreeDefault($0, forProject: group.cwd) }
-                            )) {
-                                Text("⌘N on new worktree")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                            .help("⌘N from a session here starts on a fresh git worktree")
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            Divider().padding(.vertical, 2)
-                            splitAgentRows
-                        } else {
-                            agentRows(worktree: false)
-                        }
-                    }
-                    .frame(width: Self.pickerWidth)
-                    .padding(4)
-                    .fixesPopoverFirstClick()
-                }
                 TiltRuntimeBadge(monitor: model.tiltRuntime, path: group.cwd, project: true)
-                // The project's run command, in the main checkout. Unset, it opens the
-                // editor instead, so the button is how you discover the feature.
-                Button {
-                    if model.runCommands(forProject: group.cwd).main != nil {
-                        model.runProject(group.cwd)
-                    } else {
-                        showingRunEditor = true
-                    }
-                } label: {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(model.runCommands(forProject: group.cwd).main == nil
-                                         ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                        .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.appHairline(runHovering ? 0.14 : 0)))
-                }
-                .buttonStyle(.plain)
-                .help(model.runCommands(forProject: group.cwd).main.map {
-                    "Run `\($0)` in \(group.name) (edit it in the … menu)"
-                } ?? "Set a run command for \(group.name)")
-                .hintTarget {
-                    if model.runCommands(forProject: group.cwd).main != nil {
-                        model.runProject(group.cwd)
-                    } else {
-                        showingRunEditor = true
-                    }
-                }
-                .clickCursor()
-                .onHover { runHovering = $0 }
-                .popover(isPresented: $showingRunEditor, arrowEdge: .bottom) {
-                    RunCommandEditor(project: group.cwd) { showingRunEditor = false }
-                }
-                // The project's Beads board; PRs live in the global GitHub view.
-                // Always shown so every header has the same buttons in the same place.
-                Button { model.openBeads(project: group.cwd) } label: {
-                    Image(systemName: "checklist")
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                        .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.appHairline(beadsHovering ? 0.14 : 0)))
-                }
-                .buttonStyle(.plain)
-                .help(hasBeads ? "Beads board for \(group.name)"
-                               : "Beads board (no tracker in \(group.name) yet)")
-                .hintTarget { model.openBeads(project: group.cwd) }
-                .clickCursor()
-                .onHover { beadsHovering = $0 }
-                // Per-project overflow menu. A popover of plain buttons for the same
-                // reason the agent picker is one: native Menu rows get neither the
-                // pointing-hand cursor nor a reliable first click here.
-                Button { showingProjectMenu = true } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                        .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.appHairline(menuHovering ? 0.14 : 0)))
-                }
-                .buttonStyle(.plain)
-                .help("More actions for \(group.name)")
-                .hintTarget { showingProjectMenu = true }
-                .clickCursor()
-                .onHover { menuHovering = $0 }
-                .popover(isPresented: $showingProjectMenu, arrowEdge: .bottom) {
-                    VStack(alignment: .leading, spacing: 2) {
+            }
+            // The buttons float over the name's trailing end on hover (and keyboard
+            // focus, or while one of their popovers is open) so at rest the name gets
+            // the full width — the session rows' hover chip, same reasoning.
+            .overlay(alignment: .trailing) {
+                if showsActions {
+                    HStack(spacing: 6) {
+                        // A popover (not a native Menu) so each agent option is a real SwiftUI
+                        // button: it gets the pointing-hand cursor + hover highlight, and clicks
+                        // register reliably (native menu rows did neither).
                         Button {
-                            showingProjectMenu = false
-                            // One popover at a time: open the editor once this one is gone.
-                            DispatchQueue.main.async { showingRunEditor = true }
+                            // Re-ask for the folder's git state as the popover opens: the
+                            // "New worktree" switch below is drawn from it, and the answer
+                            // this header got on appear may be missing (the core was busy,
+                            // or still starting). Coalesced and rate-limited in the model.
+                            model.loadFolderGitState(group.cwd)
+                            showingAgentPicker = true
                         } label: {
-                            Text(model.runCommands(forProject: group.cwd).isEmpty
-                                 ? "Set run commands…" : "Edit run commands…")
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Image(systemName: "plus")
+                                .font(.system(size: 12, weight: .medium))
+                                .frame(width: 22, height: 22)
                                 .contentShape(Rectangle())
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(Color.appHairline(plusHovering ? 0.14 : 0)))
                         }
                         .buttonStyle(.plain)
-                        .help("The command the ▶ buttons run, on the project and on each session")
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .help("New session in \(group.cwd)")
+                        .hintTarget {
+                            model.loadFolderGitState(group.cwd)
+                            showingAgentPicker = true
+                        }
                         .clickCursor()
-                        if !closableSessions.isEmpty {
-                            Button {
-                                model.closeSessions(closableSessions.map(\.id))
-                                showingProjectMenu = false
-                            } label: {
-                                Text(closeAllLabel)
-                                    .foregroundStyle(.red)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
+                        .onHover { plusHovering = $0 }
+                        .popover(isPresented: $showingAgentPicker, arrowEdge: .bottom) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                // Shown unless git has answered "not a repo": while the state is
+                                // still loading, hiding the worktree half would look like the
+                                // folder has no worktree choice at all.
+                                if model.folderGitState(group.cwd)?.git != false {
+                                    // Per-project worktree default. The rows below each say where
+                                    // they start, so this only decides what ⌘N does. Persisted per
+                                    // project, falling back to Settings → Sessions.
+                                    Toggle(isOn: Binding(
+                                        get: { model.worktreeDefault(forProject: group.cwd) },
+                                        set: { model.setWorktreeDefault($0, forProject: group.cwd) }
+                                    )) {
+                                        Text("⌘N on new worktree")
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .toggleStyle(.switch)
+                                    .controlSize(.mini)
+                                    .help("⌘N from a session here starts on a fresh git worktree")
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    Divider().padding(.vertical, 2)
+                                    splitAgentRows
+                                } else {
+                                    agentRows(worktree: false)
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .help("Close every session juancode owns in this project")
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .clickCursor()
+                            .frame(width: Self.pickerWidth)
+                            .padding(4)
+                            .fixesPopoverFirstClick()
                         }
+                        // The project's run command, in the main checkout. Unset, it opens the
+                        // editor instead, so the button is how you discover the feature.
                         Button {
-                            model.hideProject(group.cwd)
-                            showingProjectMenu = false
+                            if model.runCommands(forProject: group.cwd).main != nil {
+                                model.runProject(group.cwd)
+                            } else {
+                                showingRunEditor = true
+                            }
                         } label: {
-                            Text("Remove project")
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(model.runCommands(forProject: group.cwd).main == nil
+                                                 ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                                .frame(width: 22, height: 22)
                                 .contentShape(Rectangle())
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(Color.appHairline(runHovering ? 0.14 : 0)))
                         }
                         .buttonStyle(.plain)
-                        .help("Hide this project from the sidebar — its sessions keep running")
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .help(model.runCommands(forProject: group.cwd).main.map {
+                            "Run `\($0)` in \(group.name) (edit it in the … menu)"
+                        } ?? "Set a run command for \(group.name)")
+                        .hintTarget {
+                            if model.runCommands(forProject: group.cwd).main != nil {
+                                model.runProject(group.cwd)
+                            } else {
+                                showingRunEditor = true
+                            }
+                        }
                         .clickCursor()
+                        .onHover { runHovering = $0 }
+                        .popover(isPresented: $showingRunEditor, arrowEdge: .bottom) {
+                            RunCommandEditor(project: group.cwd) { showingRunEditor = false }
+                        }
+                        // The project's Beads board; PRs live in the global GitHub view.
+                        // Always among the hover buttons, so every header offers the same set.
+                        Button { model.openBeads(project: group.cwd) } label: {
+                            Image(systemName: "checklist")
+                                .font(.system(size: 12, weight: .medium))
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(Color.appHairline(beadsHovering ? 0.14 : 0)))
+                        }
+                        .buttonStyle(.plain)
+                        .help(hasBeads ? "Beads board for \(group.name)"
+                                       : "Beads board (no tracker in \(group.name) yet)")
+                        .hintTarget { model.openBeads(project: group.cwd) }
+                        .clickCursor()
+                        .onHover { beadsHovering = $0 }
+                        // Per-project overflow menu. A popover of plain buttons for the same
+                        // reason the agent picker is one: native Menu rows get neither the
+                        // pointing-hand cursor nor a reliable first click here.
+                        Button { showingProjectMenu = true } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 12, weight: .medium))
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                        .fill(Color.appHairline(menuHovering ? 0.14 : 0)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("More actions for \(group.name)")
+                        .hintTarget { showingProjectMenu = true }
+                        .clickCursor()
+                        .onHover { menuHovering = $0 }
+                        .popover(isPresented: $showingProjectMenu, arrowEdge: .bottom) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Button {
+                                    showingProjectMenu = false
+                                    // One popover at a time: open the editor once this one is gone.
+                                    DispatchQueue.main.async { showingRunEditor = true }
+                                } label: {
+                                    Text(model.runCommands(forProject: group.cwd).isEmpty
+                                         ? "Set run commands…" : "Edit run commands…")
+                                        .foregroundStyle(.primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("The command the ▶ buttons run, on the project and on each session")
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .clickCursor()
+                                if !closableSessions.isEmpty {
+                                    Button {
+                                        model.closeSessions(closableSessions.map(\.id))
+                                        showingProjectMenu = false
+                                    } label: {
+                                        Text(closeAllLabel)
+                                            .foregroundStyle(.red)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Close every session juancode owns in this project")
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .clickCursor()
+                                }
+                                Button {
+                                    model.hideProject(group.cwd)
+                                    showingProjectMenu = false
+                                } label: {
+                                    Text("Remove project")
+                                        .foregroundStyle(.primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Hide this project from the sidebar — its sessions keep running")
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .clickCursor()
+                            }
+                            .frame(minWidth: 200)
+                            .padding(4)
+                            .fixesPopoverFirstClick()
+                        }
                     }
-                    .frame(minWidth: 200)
-                    .padding(4)
-                    .fixesPopoverFirstClick()
+                    .padding(.leading, 6)
+                    .background(headerHovering ? Color.appHairline(0.08) : .clear)
+                    .background(Color.appBand)
                 }
             }
             // Line 2: quiet metadata cluster — a single 10pt style, semantic color only
@@ -2406,6 +2424,16 @@ private struct FolderHeader: View {
             }
             Button("Remove project") { model.hideProject(group.cwd) }
         }
+        .accessibilityAction(named: "New session") {
+            model.loadFolderGitState(group.cwd)
+            showingAgentPicker = true
+        }
+        .accessibilityAction(named: "Run") {
+            if model.runCommands(forProject: group.cwd).main != nil { model.runProject(group.cwd) }
+            else { showingRunEditor = true }
+        }
+        .accessibilityAction(named: "Beads board") { model.openBeads(project: group.cwd) }
+        .accessibilityAction(named: "More actions") { showingProjectMenu = true }
         .onAppear { model.loadBeads(group.cwd); model.loadFolderGitState(group.cwd) }
     }
 
@@ -2785,7 +2813,15 @@ struct SessionRow: View {
                             Image(systemName: "arrow.triangle.branch")
                                 .font(.system(size: 9)).foregroundStyle(.secondary)
                         }
-                        Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                        // Its own text so a narrow sidebar truncates the subtitle, not the
+                        // context reading; tinted only past the pressure line.
+                        if let ctx = SessionUsageFormat.context(meta.usage?.contextPercent) {
+                            Text(ctx).font(.system(size: 12).monospacedDigit())
+                                .foregroundStyle(pressureTint(
+                                    meta.usage?.contextPressure(handoffTokens: handoffTokens) ?? .ok))
+                                .fixedSize()
+                        }
                     }
                     .help(usageHelp)
                 }
@@ -2990,7 +3026,10 @@ struct SessionRow: View {
             parts.append(worktreeBranch ?? (meta.cwd as NSString).lastPathComponent)
         }
         parts.append(SessionDateFormat.compact(msSinceEpoch: meta.createdAt))
-        if let label = meta.usage?.badgeLabel { parts.append(label) }
+        if let u = meta.usage, u.totalTokens > 0 {
+            parts.append("\(SessionUsageFormat.tokens(u.totalTokens)) tok")
+            if let c = SessionUsageFormat.cost(u.costUsd) { parts.append(c) }
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -3319,6 +3358,7 @@ struct SessionContainer: View {
                             + (SessionHandoff.hint(meta.usage, handoffTokens: handoffTokens)
                                 .map { "\n" + $0 } ?? ""))
                 }
+                changeReviewBanner
                 // When this session's branch has an open PR, offer a one-click jump
                 // into the in-app PR view (scoped + deep-linked to that PR).
                 if let pr = model.openPr(forSession: meta) {
@@ -3345,23 +3385,6 @@ struct SessionContainer: View {
                     splitButton
                 }
                 Button {
-                    model.deepRefreshSelectedTerminal()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("Repaint clean — restart the CLI and resume this conversation so the pane redraws from the transcript (fixes garbled renders; drops an in-flight reply)")
-                .hintTarget { model.deepRefreshSelectedTerminal() }
-                .clickCursor()
-                Menu {
-                    Button("New Terminal Tab") { model.openSessionTerminal(meta.id) }
-                    Button("New Terminal Side by Side") { model.openSessionTerminal(meta.id, split: .sideBySide) }
-                    Button("New Terminal Stacked") { model.openSessionTerminal(meta.id, split: .stacked) }
-                } label: {
-                    Image(systemName: "plus.rectangle")
-                }
-                .help("Add a terminal tab or split in this session")
-                .clickCursor()
-                Button {
                     model.toggleBottomTerminal()
                 } label: {
                     Image(systemName: model.bottomTerminalShown ? "menubar.dock.rectangle.badge.record" : "menubar.dock.rectangle")
@@ -3382,6 +3405,25 @@ struct SessionContainer: View {
                     .hintTarget { withAnimation(.easeOut(duration: 0.18)) { panelShown.toggle() } }
                     .clickCursor()
                 }
+                // View toggles above, actions below.
+                Divider().frame(height: 16)
+                Menu {
+                    Button("New Terminal Tab") { model.openSessionTerminal(meta.id) }
+                    Button("New Terminal Side by Side") { model.openSessionTerminal(meta.id, split: .sideBySide) }
+                    Button("New Terminal Stacked") { model.openSessionTerminal(meta.id, split: .stacked) }
+                } label: {
+                    Image(systemName: "plus.rectangle")
+                }
+                .help("Add a terminal tab or split in this session")
+                .clickCursor()
+                Button {
+                    model.deepRefreshSelectedTerminal()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Repaint clean — restart the CLI and resume this conversation so the pane redraws from the transcript (fixes garbled renders; drops an in-flight reply)")
+                .hintTarget { model.deepRefreshSelectedTerminal() }
+                .clickCursor()
                 }
                 .fixedSize()
             }
@@ -3408,9 +3450,6 @@ struct SessionContainer: View {
                     // "Starting agent…" over a live-but-unpainted pane, faded out on
                     // its first pty byte (juancode-p6tw).
                     .overlay { paneBootingHint }
-                    // Review nudge floated at the bottom edge — out of the way of the
-                    // top badges + find bar, and an overlay so the pty grid never reflows.
-                    .overlay(alignment: .bottom) { changeReviewBanner }
                     // Which of a pair holds the keyboard.
                     .overlay {
                         if pair != nil {
@@ -3613,14 +3652,13 @@ struct SessionContainer: View {
         .padding(10)
     }
 
-    /// Review nudge over the terminal once the agent settles a turn with unreviewed
+    /// Review nudge in the top bar once the agent settles a turn with unreviewed
     /// changes; clears when its Changes panel is opened (see `AppModel.changeBadge`).
     @ViewBuilder
     private var changeReviewBanner: some View {
         if let stat = model.changeBadge(meta.id) {
             ChangeReviewBanner(counts: stat.counts) { model.openChanges(for: meta.id) }
-                .padding(10)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .hintTarget { model.openChanges(for: meta.id) }
         }
     }
 
