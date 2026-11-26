@@ -448,7 +448,7 @@ struct RightRailPanels: View {
                 WorktreeRailPanel()
             }
         case .oracle:
-            OracleGlobalRail(showsHeader: true)
+            OracleGlobalRail()
         case .prs:
             GitHubQueueBadge.GitHubQueuePopover(
                 slice: Binding(get: { ViewerPrSlice(storedRaw: filterRaw) },

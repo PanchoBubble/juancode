@@ -108,6 +108,9 @@ struct GitHubQueueBadge: View {
         @State private var agentPromptRow: ViewerPr?
         @State private var addressRow: ViewerPr?
 
+        /// The rail is the one host that lets the list fill its container.
+        private var inRail: Bool { listMaxHeight == nil }
+
         private var queue: ViewerPrResult { model.viewerPrs }
         /// Rows whose tracking agent is waiting on you — part of what Needs you means.
         private var decisions: Set<String> { model.viewerPrDecisionIDs }
@@ -179,7 +182,9 @@ struct GitHubQueueBadge: View {
 
         var body: some View {
             VStack(alignment: .leading, spacing: 0) {
-                header
+                // In the rail the panel header already says "PRs": no title row, the
+                // header's controls ride the filter row.
+                if !inRail { header }
                 filters
                 Divider().padding(.vertical, 2)
                 if rows.isEmpty {
@@ -250,20 +255,30 @@ struct GitHubQueueBadge: View {
                         .frame(width: 10, height: 10)
                 }
                 Spacer(minLength: 8)
-                if let at = model.viewerPrsFetchedAt {
-                    Text(relativeTime(Int(at.timeIntervalSince1970 * 1000)))
-                        .font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-                ReviewPrButton()
-                TrackedPrsButton(dismiss: { showing = false })
-                Button { model.refreshViewerPrs(force: true) } label: {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 10))
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh your queue now")
-                .clickCursor()
+                headerControls
             }
             .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 6)
+        }
+
+        /// Age, Review PR, tracked PRs and refresh: the header's row, or the end of the
+        /// rail's filter row.
+        @ViewBuilder private var headerControls: some View {
+            if inRail, model.viewerPrsLoading {
+                ProgressView().controlSize(.small).scaleEffect(0.5)
+                    .frame(width: 10, height: 10)
+            }
+            if let at = model.viewerPrsFetchedAt {
+                Text(relativeTime(Int(at.timeIntervalSince1970 * 1000)))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            ReviewPrButton(compact: inRail)
+            TrackedPrsButton(dismiss: { showing = false })
+            Button { model.refreshViewerPrs(force: true) } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh your queue now")
+            .clickCursor()
         }
 
         /// Slice and watch filter as two dropdowns on one line, instead of two chip rows.
@@ -317,12 +332,13 @@ struct GitHubQueueBadge: View {
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "arrow.up.arrow.down").font(.system(size: 9))
-                        Text(sort.label).font(.system(size: 11, weight: .medium))
+                        if !inRail { Text(sort.label).font(.system(size: 11, weight: .medium)) }
                     }
                 }
                 .menuStyle(.borderlessButton).fixedSize()
-                .help("Sort order, applied inside each repo; repos follow their first PR")
+                .help("Sort: \(sort.label). Applied inside each repo; repos follow their first PR")
                 .clickCursor()
+                if inRail { headerControls }
             }
             .padding(.horizontal, 10).padding(.bottom, 2)
         }
@@ -564,7 +580,6 @@ struct GitHubQueueBadge: View {
         @State private var showingStack = false
         @State private var eyeHovering = false
         @State private var confirmingClose = false
-        @State private var availableWidth: CGFloat = 0
 
         private var pr: PullRequest { row.pr }
         /// Both actions need a working tree — the watching agent and the fresh
@@ -589,17 +604,16 @@ struct GitHubQueueBadge: View {
         /// PR identity, stack position and tracking share the facts line. The
         /// status stripe leaves the title aligned with the row's leading edge.
         private var rowContent: some View {
-            rowLayout(countsOnTop: availableWidth >= 440)
+            rowLayout
             .padding(.horizontal, 8).padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
-            .overlay(alignment: .leading) {
+                .overlay(alignment: .leading) {
                 Rectangle().fill(pr.checks.color).frame(width: 2)
             }
         }
 
-        private func rowLayout(countsOnTop: Bool) -> some View {
+        private var rowLayout: some View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     // Verbatim: an interpolated Int is localized, so #35875 read "#35,875".
@@ -650,26 +664,20 @@ struct GitHubQueueBadge: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                     Spacer(minLength: 4)
-                    if countsOnTop, let counts = pr.diffCounts {
+                    if let counts = pr.diffCounts {
                         DiffStatLabel(counts: counts).fixedSize()
                     }
                     if hovering || model.panelNavigation.isFocused(.prs, row: row.id) {
                         actions
                     } else if let age = prAgeLabel(pr.createdAt) {
-                        Text(age).font(.system(size: 10, weight: .medium).monospacedDigit())
+                        Text(age).font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                 }
                 .frame(height: Self.factsHeight)
-                HStack(spacing: 6) {
-                    Text(pr.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
-                        .help(helpText)
-                    Spacer(minLength: 0)
-                    if !countsOnTop, let counts = pr.diffCounts {
-                        DiffStatLabel(counts: counts)
-                            .fixedSize()
-                    }
-                }
+                Text(pr.title).font(.system(size: 12)).lineLimit(2).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(helpText)
             }
         }
 
@@ -691,7 +699,7 @@ struct GitHubQueueBadge: View {
                             .monospacedDigit()
                     }
                 }
-                .foregroundStyle(assigned ? Color.secondary : Color.orange)
+                .foregroundStyle(Color.secondary)
                 .contentShape(Rectangle())
                 .help(reviewHelpText)
                 .accessibilityElement(children: .ignore)
@@ -845,13 +853,15 @@ struct GitHubQueueBadge: View {
     /// behind a click — a row jumps to its agent's session, the eye stops the watch.
     /// "Review PR": opens the URL sheet.
     private struct ReviewPrButton: View {
+        /// Glyph only, where the row has no room for the words.
+        var compact = false
         @State private var showing = false
 
         var body: some View {
             Button { showing = true } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "link.badge.plus").font(.system(size: 10))
-                    Text("Review PR").font(.system(size: 10))
+                    if !compact { Text("Review PR").font(.system(size: 10)) }
                 }
             }
             .buttonStyle(.borderless)

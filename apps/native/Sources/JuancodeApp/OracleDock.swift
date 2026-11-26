@@ -276,8 +276,8 @@ private struct OracleChatView: View {
     }
 }
 
-/// The Oracle rail's title-bar extras: the live count and the "+" that starts
-/// another Oracle. Shared by the rail's own header and the right rail's panel bar.
+/// The Oracle rail's extras: the live count and the "+" that starts another Oracle,
+/// at the end of the filter row.
 struct OracleRailAccessory: View {
     @Environment(AppModel.self) private var model
     @Environment(OracleModel.self) private var oracle
@@ -286,7 +286,7 @@ struct OracleRailAccessory: View {
         let sessions = oracle.oracleSessions
         let live = sessions.filter { model.isLive($0.id) }.count
         if live == 0 {
-            Text("\(sessions.count)").font(.system(size: 10)).foregroundStyle(.tertiary)
+            Text("\(sessions.count)").font(.system(size: 11)).foregroundStyle(.secondary)
         } else {
             // A live count reads at a glance; the total is in the tooltip.
             Text("\(live) live")
@@ -297,7 +297,6 @@ struct OracleRailAccessory: View {
                 .clipShape(Capsule())
                 .help("\(live) of \(sessions.count) Oracles running")
         }
-        Spacer()
         Menu {
             ForEach(ProviderId.allCases, id: \.self) { p in
                 Button(Providers.spec(for: p).label) {
@@ -344,9 +343,6 @@ struct OracleGlobalRail: View {
     /// Measured height of the row area. The row budget derives from it, so the rail
     /// only builds the rows that can actually be on screen instead of all of them.
     @State private var listHeight: Double = 0
-    /// Off when a host draws the title bar itself.
-    var showsHeader = true
-
     /// Approximate rendered height of one row (glyph line + subtitle + padding) —
     /// what the fitted budget divides the measured height by.
     private static let rowHeight: Double = 44
@@ -413,47 +409,39 @@ struct OracleGlobalRail: View {
         let shown = searching ? pool : Array(pool.prefix(budget))
         let hidden = all.count - shown.count
         return VStack(spacing: 0) {
-            if showsHeader {
-                HStack(spacing: 5) {
-                    Image(systemName: "sparkles").font(.system(size: 10)).foregroundStyle(.tint)
-                    Text("Oracles")
-                        .font(.system(size: 10, weight: .semibold))
-                        .textCase(.uppercase).tracking(0.5)
-                        .foregroundStyle(.secondary)
+            // The panel's own header already names this ("Oracles"); the live count and
+            // the "+" ride the filter row instead of a title row of their own.
+            if !sessions.isEmpty {
+                HStack(spacing: 6) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(query.isEmpty ? Color.secondary : Color.accentColor)
+                        TextField("Filter Oracles…", text: $query)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11))
+                            .onKeyPress(.escape) {
+                                guard !query.isEmpty else { return .ignored }
+                                query = ""
+                                return .handled
+                            }
+                        if !query.isEmpty {
+                            Button { query = "" } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear filter (Esc)")
+                            .clickCursor()
+                        }
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(query.isEmpty ? Color.secondary.opacity(0.25) : Color.accentColor,
+                                      lineWidth: 1))
                     OracleRailAccessory()
                 }
-                .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 6)
-            } else {
-                Spacer().frame(height: 6)
-            }
-            if !sessions.isEmpty {
-                HStack(spacing: 5) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                        .font(.system(size: 10))
-                        .foregroundStyle(query.isEmpty ? Color.secondary : Color.accentColor)
-                    TextField("Filter Oracles…", text: $query)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 11))
-                        .onKeyPress(.escape) {
-                            guard !query.isEmpty else { return .ignored }
-                            query = ""
-                            return .handled
-                        }
-                    if !query.isEmpty {
-                        Button { query = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear filter (Esc)")
-                        .clickCursor()
-                    }
-                }
-                .padding(.horizontal, 6).padding(.vertical, 4)
-                .background(RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(query.isEmpty ? Color.secondary.opacity(0.25) : Color.accentColor,
-                                  lineWidth: 1))
-                .padding(.horizontal, 8).padding(.bottom, 6)
+                .padding(.horizontal, 8).padding(.top, 6).padding(.bottom, 6)
             }
             Divider()
             if sessions.isEmpty {
@@ -612,9 +600,9 @@ struct OracleGlobalRail: View {
     /// Tiny uppercase divider between the Active and Idle groups.
     private func groupLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 9, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
             .textCase(.uppercase).tracking(0.5)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 3)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -623,7 +611,7 @@ struct OracleGlobalRail: View {
     private func footerButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -678,7 +666,8 @@ private struct OracleRailRow: View {
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
                     .lineLimit(1)
                 Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                if let chain {
+                // A chain named after its Oracle would just repeat the title above.
+                if let chain, chain.name != (placeholder ? "Oracle \(number)" : meta.title) {
                     ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id))
                 }
             }
@@ -735,13 +724,15 @@ private struct OracleRailRow: View {
         SessionStatusAppearance.help(live: live, activity: activity, unread: unread, unseenDone: unseenDone)
     }
 
-    /// Meta line under the title: the stable Oracle number, when it started, and its
-    /// usage rollup once the CLI reports one — the same vocabulary as sidebar rows.
+    /// Meta line under the title: when it started and its usage rollup once the CLI
+    /// reports one — the same vocabulary as sidebar rows. No "Oracle N": the title
+    /// already carries it until the CLI writes a real one, and it cost the context
+    /// figure its room.
     private var subtitle: String {
-        var parts = ["Oracle \(number)", SessionDateFormat.compact(msSinceEpoch: meta.createdAt)]
+        var parts = [SessionDateFormat.compact(msSinceEpoch: meta.createdAt)]
         // Only non-default CLIs are named: with every Oracle on claude the badge would
         // be noise, and the rail's width is the scarce thing here.
-        if meta.provider != .claude { parts.insert(Providers.spec(for: meta.provider).label, at: 1) }
+        if meta.provider != .claude { parts.insert(Providers.spec(for: meta.provider).label, at: 0) }
         if let label = meta.usage?.badgeLabel { parts.append(label) }
         return parts.joined(separator: " · ")
     }
