@@ -45,21 +45,19 @@ struct SessionView: View {
             .padding(.vertical, 4)
             if let voiceError { Text(voiceError).font(.caption).foregroundStyle(.red).padding(.horizontal, 8) }
             AttachmentChips(attachments: attachments)
-            HStack {
+            HStack(alignment: .bottom, spacing: 6) {
                 if let oracle = core.pairing.oracle {
                     AttachButton(attachments: attachments, client: SidecarClient(base: oracle, token: core.pairing.token))
                     micButton
                 }
                 TextField("Message", text: $line, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
-                Button {
+                    .composerField()
+                SendButton(disabled: attachments.busy || (line.isEmpty && attachments.paths.isEmpty)) {
                     core.input(sessionId, attachments.take(into: line))
                     core.keys(sessionId, ["Enter"])
                     line = ""
-                } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-                    .accessibilityLabel("Send")
-                    .disabled(attachments.busy || (line.isEmpty && attachments.paths.isEmpty))
+                }
             }
             .padding(8)
         }
@@ -76,8 +74,8 @@ struct SessionView: View {
 
     /// Hold to record; on release the Mac's Whisper transcribes it into the field for editing.
     private var micButton: some View {
-        Image(systemName: recorder.isRecording ? "mic.circle.fill" : "mic.circle")
-            .font(.title2)
+        Image(systemName: recorder.isRecording ? "mic.fill" : "mic")
+            .composerIcon()
             .foregroundStyle(recorder.isRecording ? .red : .accentColor)
             .opacity(transcribing ? 0.4 : 1)
             .accessibilityLabel("Hold to talk")

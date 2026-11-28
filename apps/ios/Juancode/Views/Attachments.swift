@@ -56,7 +56,7 @@ struct AttachButton: View {
             Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo") }
             Button { showFiles = true } label: { Label("Files", systemImage: "folder") }
         } label: {
-            Image(systemName: "paperclip.circle").font(.title2)
+            Image(systemName: "paperclip").composerIcon()
         }
         .accessibilityLabel("Attach")
         .photosPicker(isPresented: $showPhotos, selection: $photos, matching: .any(of: [.images, .videos]))
@@ -123,5 +123,37 @@ struct AttachmentChips: View {
             }
             .padding(.horizontal, 8)
         }
+    }
+}
+
+// MARK: Composer chrome shared by the session and Oracle input bars.
+
+extension View {
+    /// 40pt tap target for a bare glyph (attach, mic).
+    func composerIcon() -> some View {
+        font(.system(size: 20, weight: .medium)).frame(width: 40, height: 40).contentShape(Rectangle())
+    }
+
+    func composerField() -> some View {
+        textFieldStyle(.plain)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Tok.surface, in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Tok.surface2))
+    }
+}
+
+struct SendButton: View {
+    let disabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up").font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(disabled ? Tok.surface2 : Tok.blue, in: Circle())
+        }
+        .disabled(disabled)
+        .accessibilityLabel("Send")
+        .animation(.snappy, value: disabled)
     }
 }

@@ -81,10 +81,11 @@ struct OracleChatView: View {
                     }.pickerStyle(.menu)
                     AttachButton(attachments: attachments, client: client)
                     TextField("Ask the Oracle", text: $draft, axis: .vertical).lineLimit(1...4)
-                        .textFieldStyle(.roundedBorder)
-                    Button { send(client) } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-                        .disabled(chat.busy || attachments.busy
-                                  || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.paths.isEmpty))
+                        .composerField()
+                    SendButton(disabled: chat.busy || attachments.busy
+                               || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.paths.isEmpty)) {
+                        send(client)
+                    }
                 }.padding()
             }
         } else {
