@@ -11,7 +11,6 @@ struct RootView: View {
     @State private var panel: Panel?
     @State private var popover: Popover?
     @State private var oracle = false
-    @State private var keyboardUp = false
     @AppStorage("dockHidden") private var dockCollapsed = true
     @State private var chat = OracleChat()
 
@@ -43,28 +42,26 @@ struct RootView: View {
             }
         }
         .overlay {
-            if popover != nil {
+            // The keypad leaves the terminal visible and live, so you can watch what the keys do.
+            if popover != nil, popover != .keys {
                 Color.black.opacity(0.4).ignoresSafeArea()
                     .onTapGesture { withAnimation(.spring(duration: 0.3)) { popover = nil } }
                     .transition(.opacity)
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if !keyboardUp {
-                VStack(alignment: .trailing, spacing: 8) {
-                    if !dockCollapsed {
-                        HStack(alignment: .bottom, spacing: 10) {
-                            if let popover { popoverCard(popover) }
-                            ActionDock(core: core, popover: popover, hasSession: selected != nil) { tap($0) }
-                        }
-                        .transition(.scale(scale: 0.3, anchor: .bottomTrailing).combined(with: .opacity))
+            VStack(alignment: .trailing, spacing: 8) {
+                if !dockCollapsed {
+                    HStack(alignment: .bottom, spacing: 10) {
+                        if let popover { popoverCard(popover) }
+                        ActionDock(core: core, popover: popover, hasSession: selected != nil) { tap($0) }
                     }
-                    dockToggle
+                    .transition(.scale(scale: 0.3, anchor: .bottomTrailing).combined(with: .opacity))
                 }
-                .padding(.trailing, 12)
-                .padding(.bottom, 72) // clear the input bar
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                dockToggle
             }
+            .padding(.trailing, 12)
+            .padding(.bottom, 72) // clear the input bar; rides above the keyboard with it
         }
         .sheet(item: $panel) { p in
             Group {
@@ -86,10 +83,7 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            withAnimation(.snappy) { keyboardUp = true; popover = nil }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            withAnimation(.snappy) { keyboardUp = false }
+            if popover != .keys { withAnimation(.snappy) { popover = nil } }
         }
         .task { core.start() }
     }

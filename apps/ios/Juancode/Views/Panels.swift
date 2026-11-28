@@ -81,7 +81,8 @@ struct ProjectsView: View {
             .searchable(text: $query, isPresented: $searching, prompt: "Search projects")
             .navigationTitle("Projects")
             .navigationDestination(for: String.self) { ProjectSessionsView(core: core, path: $0, open: open) }
-            .refreshable { await core.refreshSessions() }
+            // Not .refreshable: pull-to-refresh fought the sheet's drag-to-dismiss.
+            .task { await core.refreshSessions() }
         }
     }
 }
