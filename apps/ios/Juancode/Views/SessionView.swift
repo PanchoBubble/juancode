@@ -15,6 +15,7 @@ struct SessionView: View {
     @State private var transcribing = false
     @State private var voiceError: String?
     @State private var attachments = Attachments()
+    @State private var confirmStop = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,15 +44,29 @@ struct SessionView: View {
             }
             .padding(8)
         }
-        .navigationTitle(core.sessions.first { $0.id == sessionId }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let session = core.sessions.first(where: { $0.id == sessionId }), session.kind == .agent {
-                ToolbarItem(placement: .topBarTrailing) { ContextMeter(percent: session.usage?.contextPercent) }
+            ToolbarItem(placement: .principal) {
+                Text(core.sessions.first { $0.id == sessionId }?.title ?? "")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(Tok.text)
+                    .lineLimit(2).multilineTextAlignment(.center)
             }
-            if core.pairing.oracle != nil { ToolbarItem(placement: .topBarTrailing) { alertsMenu } }
+            if let session = core.sessions.first(where: { $0.id == sessionId }), session.kind == .agent {
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 8) {
+                        if let chain = core.chains.chain(forSession: session.id) {
+                            ChainChip(name: chain.name, role: nil).frame(maxWidth: 96)
+                        }
+                        ContextMeter(percent: session.usage?.contextPercent)
+                    }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) { sessionMenu }
         }
-        .task { alerts = try? await AlertsClient.fetch(core.pairing) }
+        .task { if core.pairing.oracle != nil { alerts = try? await AlertsClient.fetch(core.pairing) } }
+        .confirmationDialog("Stop this session?", isPresented: $confirmStop, titleVisibility: .visible) {
+            Button("Stop session", role: .destructive) { core.kill(sessionId) }
+        } message: { Text("Ends the CLI process on the Mac. The conversation stays resumable.") }
         // A dead (killed or vanished) session must not keep the keyboard up: the dock hides under it,
         // leaving no way to leave the session.
         .onChange(of: core.sessions.first { $0.id == sessionId }?.status != .running, initial: true) { _, dead in
@@ -89,29 +104,51 @@ struct SessionView: View {
         .accessibilityLabel(transcribing ? "Transcribing" : "Stop recording")
     }
 
-    /// Per-session push toggle, plus the ntfy topic to subscribe to in the ntfy app.
-    private var alertsMenu: some View {
+    /// "…": session actions, plus the per-session push toggle and its ntfy topic.
+    private var sessionMenu: some View {
+        let session = core.sessions.first { $0.id == sessionId }
+        let running = session?.status == .running
         let on = !(alerts?.muted.contains(sessionId) ?? false)
         return Menu {
-            Button {
-                Task {
-                    if let next = try? await AlertsClient.setEnabled(core.pairing, sessionId: sessionId, enabled: !on) {
-                        alerts = next
+            if let session {
+                if running {
+                    Button { core.respawn("restartFresh", sessionId) } label: {
+                        Label("Restart fresh", systemImage: "arrow.counterclockwise")
                     }
+                } else {
+                    Button { core.respawn("reactivate", sessionId) } label: { Label("Resume", systemImage: "play.fill") }
                 }
-            } label: {
-                Label(on ? "Alerts on for this session" : "Alerts muted", systemImage: on ? "bell.fill" : "bell.slash")
+                Button {
+                    core.respawn("setSkipPermissions", sessionId, extra: ["skipPermissions": !session.skipPermissions])
+                } label: {
+                    Label(session.skipPermissions ? "Ask for permissions" : "Accept all",
+                          systemImage: session.skipPermissions ? "lock" : "bolt.shield")
+                }
             }
+            if alerts != nil {
+                Button {
+                    Task {
+                        if let next = try? await AlertsClient.setEnabled(core.pairing, sessionId: sessionId, enabled: !on) {
+                            alerts = next
+                        }
+                    }
+                } label: {
+                    Label(on ? "Mute phone alerts" : "Unmute phone alerts", systemImage: on ? "bell.slash" : "bell")
+                }
+            }
+            Button { UIPasteboard.general.string = sessionId } label: { Label("Copy session id", systemImage: "doc.on.doc") }
             if let topic = alerts?.topic {
                 Section("ntfy topic") {
                     Button(topic) { UIPasteboard.general.string = topic }
                     if let url = URL(string: "ntfy://ntfy.sh/\(topic)") { Link("Open in ntfy", destination: url) }
                 }
             }
+            if running {
+                Button(role: .destructive) { confirmStop = true } label: { Label("Stop session", systemImage: "stop.fill") }
+            }
         } label: {
-            Image(systemName: on ? "bell.fill" : "bell.slash").accessibilityLabel("Phone alerts")
+            Image(systemName: "ellipsis.circle").accessibilityLabel("Session actions")
         }
-        .disabled(alerts == nil)
     }
 }
 

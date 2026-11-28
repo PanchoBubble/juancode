@@ -40,6 +40,16 @@ struct RootView: View {
                        : EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 66)
     }
 
+    private var statusColor: Color {
+        guard core.connected else { return .red }
+        guard let s = core.sessions.first(where: { $0.id == selected }), s.status == .running else { return .green }
+        switch core.liveActivity(s) {
+        case .busy: return Tok.blue
+        case .waitingInput: return Tok.waiting
+        default: return .green
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -56,7 +66,8 @@ struct RootView: View {
                         Text(core.connected ? "Connected" : core.lastError ?? "Disconnected")
                         Button("Unpair", role: .destructive, action: unpair)
                     } label: {
-                        Circle().fill(core.connected ? .green : .red).frame(width: 8, height: 8)
+                        // Connection, then the open session's activity, as one line.
+                        Capsule().fill(statusColor).frame(width: 4, height: 22)
                     }
                     .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
                 }

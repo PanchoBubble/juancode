@@ -157,6 +157,14 @@ final class RemoteCore {
         send(body)
     }
 
+    func kill(_ id: String) { send(["type": "kill", "sessionId": id]) }
+    /// `reactivate` / `restartFresh` / `setSkipPermissions` respawn the pty, so they carry a grid:
+    /// the phone's when it is attached to that session.
+    func respawn(_ type: String, _ id: String, extra: [String: Any] = [:]) {
+        let size = attachedTo?.id == id ? attachedTo! : (id: id, cols: 80, rows: 24)
+        send(["type": type, "sessionId": id, "cols": size.cols, "rows": size.rows].merging(extra) { $1 })
+    }
+
     private func send(_ body: [String: Any]) { wire?.send(body) }
 
     // MARK: Server frames
