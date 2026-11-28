@@ -14,7 +14,7 @@ import JuancodeServices
 /// registry a compile error rather than a habit.
 ///
 /// The surface is modelled on the WebSocket message set the wire speaks
-/// (`JuancodeServer/WireProtocol.swift`) plus the REST endpoints the relay exposes.
+/// (`JuancodeWire/WireProtocol.swift`) plus the REST endpoints the relay exposes.
 /// That set is the contract, remote clients already depend on it, and re-deriving a
 /// second vocabulary here would be a second contract to keep in sync. Each section
 /// below names the wire messages it covers.

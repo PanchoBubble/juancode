@@ -1,5 +1,5 @@
 import Foundation
-import JuancodeCore
+
 
 /// The WebSocket wire protocol: tagged unions whose discriminator is the `type`
 /// field; every other field sits flat alongside it. Originally a faithful mirror

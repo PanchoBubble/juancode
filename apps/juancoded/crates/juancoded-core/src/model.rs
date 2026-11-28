@@ -1,4 +1,4 @@
-//! Wire model types, mirrored field-for-field from `JuancodeCore/Protocol.swift`.
+//! Wire model types, mirrored field-for-field from `JuancodeWire/Protocol.swift`.
 //! The JSON these produce is consumed by clients written against the Swift core,
 //! so field names, casing and enum spellings are protocol, not taste.
 

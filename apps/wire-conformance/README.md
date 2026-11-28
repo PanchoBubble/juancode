@@ -40,7 +40,7 @@ conformant at v1 when it passes every scenario in `spec/v1`.
   measured for as long as any core claims it.
 
 `src/drift.test.ts` compares the catalogue against both wire sources directly -
-`apps/native/Sources/JuancodeServer/WireProtocol.swift`, which survives the Swift
+`apps/native/Sources/JuancodeWire/WireProtocol.swift`, which survives the Swift
 core's deletion because it is what the desktop client and the `:4280` relay encode
 with, and
 `apps/juancoded/crates/juancoded-server/src/wire.rs` - so adding a message or a

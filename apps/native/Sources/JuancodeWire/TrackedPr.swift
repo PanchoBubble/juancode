@@ -22,7 +22,7 @@ import Foundation
 /// runs the engine, so what is left here is the shape the RUST path decodes into —
 /// `RustCoreClient` reads `TrackedPr`, `PrTrackSnapshot` and `TrackNotification`,
 /// `JuancodePersistence` stores them (`TrackedPrStore`, which used to be payload-only
-/// precisely because it could not see this type), `JuancodeServer/WireProtocol.swift`
+/// precisely because it could not see this type), `JuancodeWire/WireProtocol.swift`
 /// carries them and `JuancodeDesktop/LinearIssueTracker.swift` shares `TrackEvent`.
 /// `JuancodeCore` is the only target all four can reach. `commentTaskPrompt` and
 /// `diffReviewPrompt` have no Rust twin at all — they are the GitHub view's own.

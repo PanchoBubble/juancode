@@ -8,6 +8,7 @@
 // accidents, and the difference is `ownerManaged`, which is what these tests are about.
 
 import XCTest
+import JuancodeWire
 @testable import JuancodeClient
 
 final class DaemonPersistenceTests: XCTestCase {

@@ -1,31 +1,6 @@
 import Foundation
 import SwiftTerm
 
-/// A cell's color, mirrored out of SwiftTerm's `Attribute.Color` into a plain
-/// `Sendable` value so a snapshot can cross threads (a view projection, a remote
-/// client) without holding a reference into the live emulator.
-public enum TerminalColor: Sendable, Equatable {
-    case `default`
-    case defaultInverted
-    case ansi(UInt8)
-    case trueColor(r: UInt8, g: UInt8, b: UInt8)
-}
-
-/// A cell's text attributes, mirrored out of SwiftTerm's `CharacterStyle`.
-public struct TerminalCellStyle: OptionSet, Sendable, Hashable {
-    public let rawValue: UInt8
-    public init(rawValue: UInt8) { self.rawValue = rawValue }
-
-    public static let bold = TerminalCellStyle(rawValue: 1 << 0)
-    public static let underline = TerminalCellStyle(rawValue: 1 << 1)
-    public static let blink = TerminalCellStyle(rawValue: 1 << 2)
-    public static let inverse = TerminalCellStyle(rawValue: 1 << 3)
-    public static let invisible = TerminalCellStyle(rawValue: 1 << 4)
-    public static let dim = TerminalCellStyle(rawValue: 1 << 5)
-    public static let italic = TerminalCellStyle(rawValue: 1 << 6)
-    public static let crossedOut = TerminalCellStyle(rawValue: 1 << 7)
-}
-
 /// One rendered grid cell: the grapheme plus its style, extracted from the live
 /// emulator. `width` is 1 for normal cells, 2 for the lead cell of a wide glyph
 /// (the trailing spacer cell is dropped from `TerminalRow.cells`).

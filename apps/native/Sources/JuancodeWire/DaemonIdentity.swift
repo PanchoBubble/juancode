@@ -90,7 +90,7 @@ public struct DaemonIdentity: Sendable, Equatable {
     /// them, and that process is the one thing a rebuild does not touch — so the moment
     /// the UI says "these survive a quit" is the moment it has to say what they are
     /// surviving on.
-    var persistence: String? {
+    public var persistence: String? {
         guard owner.outlivesTheApp else { return nil }
         let keeper = owner.managed == .launchd
             ? "launchd keeps it running across quits, logout and reboot"
@@ -106,7 +106,7 @@ public struct DaemonIdentity: Sendable, Equatable {
         return line
     }
 
-    static let clock: DateFormatter = {
+    public static let clock: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         return f
@@ -270,7 +270,7 @@ public extension DaemonIdentity {
     /// `binaryModifiedAt` is the mtime of `exePath` **now** — injected rather than
     /// stat'ed inside, so the comparison is testable without a filesystem. Call
     /// `warnings(against:)` for the live version.
-    func warnings(against app: AppIdentity, binaryModifiedAt: Date?) -> [DaemonWarning] {
+    public func warnings(against app: AppIdentity, binaryModifiedAt: Date?) -> [DaemonWarning] {
         var found: [DaemonWarning] = []
 
         // A build id mismatch is exact and needs no interpretation, so it wins over
@@ -319,7 +319,7 @@ public extension DaemonIdentity {
     }
 
     /// The live comparison: stats `exePath` for its current mtime.
-    func warnings(against app: AppIdentity = .current) -> [DaemonWarning] {
+    public func warnings(against app: AppIdentity = .current) -> [DaemonWarning] {
         let now = exePath.flatMap {
             (try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate]) as? Date
         }

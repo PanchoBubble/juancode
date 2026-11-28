@@ -116,7 +116,7 @@ Implement bd ticket <ID> end-to-end: read it with `sh -c 'bd show <ID> 2>&1 </de
 then investigate, implement, test, commit, push, close.
 
 Easy to miss:
-- Wire protocol: apps/native/Sources/JuancodeServer/WireProtocol.swift and its
+- Wire protocol: apps/native/Sources/JuancodeWire/WireProtocol.swift and its
   sidecar mirror apps/oracle-mcp/src/native-events.ts change together.
 - Never `Task.sleep(for:)` in apps/native (aborts the release app); use `Nap`.
 - Swift gate: `swift build --package-path apps/native` plus the narrowest

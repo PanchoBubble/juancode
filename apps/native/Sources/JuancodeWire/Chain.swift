@@ -5,7 +5,7 @@ import Foundation
 /// The book lives in the daemon (`juancoded-core/src/chain.rs` for the model,
 /// `juancoded-server/src/chains.rs` for the engine) and reaches every client over the
 /// `chains` capability. These are the shapes it decodes into, in `JuancodeCore`
-/// because both `JuancodeServer/WireProtocol.swift` and `JuancodeClient` carry them.
+/// because both `JuancodeWire/WireProtocol.swift` and `JuancodeClient` carry them.
 ///
 /// A chain has a stable UUID and display name. `slug` is retained as a compatibility
 /// routing key for existing links; newly named chains use the UUID. An item

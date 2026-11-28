@@ -1,7 +1,7 @@
 {
   "specRevision": "1.25.0",
   "protocolVersion": 1,
-  "source": "apps/native/Sources/JuancodeServer/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
+  "source": "apps/native/Sources/JuancodeWire/WireProtocol.swift + apps/juancoded/crates/juancoded-server/src/wire.rs",
   "transport": {
     "path": "/ws",
     "encoding": "json-text-frames",

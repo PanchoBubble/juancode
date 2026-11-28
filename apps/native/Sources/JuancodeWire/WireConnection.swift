@@ -8,19 +8,19 @@ import Foundation
 /// knows what a frame *means* lives in `RustCoreClient`, so the transport can be
 /// swapped (a unix socket is what `juancoded` really wants us on) without
 /// touching the semantics.
-final class WireConnection: @unchecked Sendable {
+public final class WireConnection: @unchecked Sendable {
     /// A frame as it arrived: the discriminator plus the flat object it rode in.
     /// Frames are flat by spec ("every field sits alongside `type`"), so a
     /// dictionary is the whole shape and no envelope type is needed.
-    typealias Frame = (type: String, body: [String: Any])
+    public typealias Frame = (type: String, body: [String: Any])
 
-    enum ConnectError: LocalizedError {
+    public enum ConnectError: LocalizedError {
         case badURL(String)
         case timedOut(seconds: Double, url: String)
         case closed(url: String, reason: String)
         case unsupportedProtocol(theirs: Int, ours: Int)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .badURL(let url):
                 return "Not a usable core URL: \(url)"
@@ -35,15 +35,15 @@ final class WireConnection: @unchecked Sendable {
     }
 
     /// The handshake, once it has landed.
-    struct Handshake: Sendable {
-        let protocolVersion: Int
-        let capabilities: [String]
+    public struct Handshake: Sendable {
+        public let protocolVersion: Int
+        public let capabilities: [String]
         /// This connection's grid-ownership token. Absent on cores that predate
         /// `serverInfo.clientId`, which is the same set that has no `gridOwner`.
-        let clientId: String?
+        public let clientId: String?
         /// Who the daemon is: build, boot time and effective retention. Absent for an
         /// in-process core, and for a daemon older than `serverInfo.daemon`.
-        let daemon: DaemonIdentity?
+        public let daemon: DaemonIdentity?
     }
 
     private let url: URL
@@ -62,7 +62,7 @@ final class WireConnection: @unchecked Sendable {
     /// instead of quietly showing a frozen session.
     private let onConnectionChange: @Sendable (Bool, String?) -> Void
 
-    init(url: URL,
+    public init(url: URL,
          onFrame: @escaping @Sendable (Frame) -> Void,
          onConnectionChange: @escaping @Sendable (Bool, String?) -> Void) {
         self.url = url
@@ -74,7 +74,7 @@ final class WireConnection: @unchecked Sendable {
     }
 
     /// Turn a base URL (`http://127.0.0.1:4290`) into the `/ws` endpoint.
-    static func websocketURL(base: String) throws -> URL {
+    public static func websocketURL(base: String) throws -> URL {
         guard var comps = URLComponents(string: base) else { throw ConnectError.badURL(base) }
         switch comps.scheme {
         case "http", nil: comps.scheme = "ws"
@@ -90,7 +90,7 @@ final class WireConnection: @unchecked Sendable {
     /// Open the socket and block until `serverInfo` lands, so a caller knows the
     /// capability list before it hands the client to any UI. The spec makes this
     /// safe to wait on: `serverInfo` is frame 0 on every connection.
-    func connectAndWaitForHandshake(timeout: TimeInterval, expectedVersion: Int) throws -> Handshake {
+    public func connectAndWaitForHandshake(timeout: TimeInterval, expectedVersion: Int) throws -> Handshake {
         openSocket()
         let waiter = DispatchSemaphore(value: 0)
         let already: Handshake? = lock.withLock {
@@ -121,7 +121,7 @@ final class WireConnection: @unchecked Sendable {
     /// Send one client frame. Fire-and-forget: the protocol acks what needs
     /// acking (`inputAck`, `resizeAck`) at the frame level, so a send failure is a
     /// connection problem, which `onConnectionChange` already reports.
-    func send(_ body: [String: Any]) {
+    public func send(_ body: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: body),
               let text = String(data: data, encoding: .utf8) else {
             NSLog("juancode: could not encode a \(body["type"] ?? "?") frame")
@@ -135,7 +135,7 @@ final class WireConnection: @unchecked Sendable {
     }
 
     /// Close for good. Idempotent, and stops the reconnect loop.
-    func stop() {
+    public func stop() {
         let task: URLSessionWebSocketTask? = lock.withLock {
             stopped = true
             let t = self.task

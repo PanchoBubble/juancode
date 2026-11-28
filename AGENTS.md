@@ -36,7 +36,7 @@ for it.
 ## Architecture (one paragraph)
 
 The `juancoded` daemon owns the ptys and speaks the wire protocol
-(`apps/native/Sources/JuancodeServer/WireProtocol.swift` is the Swift side of it),
+(`apps/native/Sources/JuancodeWire/WireProtocol.swift` is the Swift side of it),
 broadcasting session `activity` over `/ws`. The native app relays `:4280` to it, and the
 oracle sidecar keeps a single long-lived WS client to that relay
 (`apps/oracle-mcp/src/native-events.ts`) and fans session events out in-process to the

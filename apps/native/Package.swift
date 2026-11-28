@@ -3,8 +3,9 @@ import PackageDescription
 
 let package = Package(
     name: "Juancode",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
+        .library(name: "JuancodeWire", targets: ["JuancodeWire"]),
         .library(name: "JuancodeCore", targets: ["JuancodeCore"]),
         .library(name: "JuancodePersistence", targets: ["JuancodePersistence"]),
         .library(name: "JuancodeServices", targets: ["JuancodeServices"]),
@@ -75,6 +76,10 @@ let package = Package(
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", from: "2.4.0"),
     ],
     targets: [
+        // The wire message types and the client connection, Foundation only, so the
+        // iOS app (juancode-3aq8) can link them. Nothing here may import a Mac-only
+        // module; `JuancodeCore` re-exports it.
+        .target(name: "JuancodeWire"),
         // The native core that replaces node-pty + the server's session layer
         // (juancode-u34.2). The embedded server and the GRDB store are *consumers*
         // of this core. SwiftTerm is the one exception: the headless VT engine
@@ -82,7 +87,7 @@ let package = Package(
         // SwiftTerm `Terminal` with no view, so the core links SwiftTerm directly.
         .target(
             name: "JuancodeCore",
-            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")]
+            dependencies: ["JuancodeWire", .product(name: "SwiftTerm", package: "SwiftTerm")]
         ),
         // SQLite persistence (juancode-u34.5): GRDB-backed PersistentStore mirroring
         // db.ts — sessions (metadata + scrollback), diff comments, cached reviews,
@@ -144,8 +149,8 @@ let package = Package(
         ),
         // The `:4280` relay (juancode-u34.3, juancode-bse5): a Hummingbird app that
         // forwards /ws verbatim to the `juancoded` daemon and answers the REST session
-        // reads the daemon does not serve, out of the desktop's mirror. Plus
-        // `WireProtocol`, the Swift side of the wire that `JuancodeClient` encodes with.
+        // reads the daemon does not serve, out of the desktop's mirror. `WireProtocol`,
+        // the Swift side of the wire, moved to `JuancodeWire` (juancode-3aq8.2).
         //
         // It used to be a whole second server over an in-process registry; juancode-nqpm
         // deleted that, and the `JuancodeServices` / `JuancodePersistence` dependencies
