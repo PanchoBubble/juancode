@@ -7,6 +7,7 @@ struct SessionView: View {
     let core: RemoteCore
     let sessionId: String
     @State private var line = ""
+    @State private var alerts: AlertsState?
 
     private static let keyRow: [(label: String, keys: [String]?, text: String?)] = [
         ("Esc", ["Escape"], nil), ("↑", ["Up"], nil), ("↓", ["Down"], nil),
@@ -46,6 +47,33 @@ struct SessionView: View {
         }
         .navigationTitle(core.sessions.first { $0.id == sessionId }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { if core.pairing.oracle != nil { ToolbarItem(placement: .topBarTrailing) { alertsMenu } } }
+        .task { alerts = try? await AlertsClient.fetch(core.pairing) }
+    }
+
+    /// Per-session push toggle, plus the ntfy topic to subscribe to in the ntfy app.
+    private var alertsMenu: some View {
+        let on = !(alerts?.muted.contains(sessionId) ?? false)
+        return Menu {
+            Button {
+                Task {
+                    if let next = try? await AlertsClient.setEnabled(core.pairing, sessionId: sessionId, enabled: !on) {
+                        alerts = next
+                    }
+                }
+            } label: {
+                Label(on ? "Alerts on for this session" : "Alerts muted", systemImage: on ? "bell.fill" : "bell.slash")
+            }
+            if let topic = alerts?.topic {
+                Section("ntfy topic") {
+                    Button(topic) { UIPasteboard.general.string = topic }
+                    if let url = URL(string: "ntfy://ntfy.sh/\(topic)") { Link("Open in ntfy", destination: url) }
+                }
+            }
+        } label: {
+            Image(systemName: on ? "bell.fill" : "bell.slash").accessibilityLabel("Phone alerts")
+        }
+        .disabled(alerts == nil)
     }
 }
 

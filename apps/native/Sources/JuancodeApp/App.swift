@@ -97,8 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// itself idle-sleep, so we're not pinning the whole machine awake.
     private var activityToken: NSObjectProtocol?
     private var restoreObservers: [NSObjectProtocol] = []
+    @MainActor private let presence = PresenceReporter()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { presence.start() }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 

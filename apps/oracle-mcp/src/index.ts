@@ -66,6 +66,7 @@ import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { KEY_NAMES, unknownKey, unknownKeyMessage } from "./keys.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
 import { loadOrCreateToken, remoteAuth } from "./remote-auth.ts";
+import { PhoneAlerts } from "./phone-alerts.ts";
 import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
 import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
 import {
@@ -1089,6 +1090,29 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
   }
 });
 
+// Phone alerts (juancode-3aq8.7): ntfy topic + per-session bell, plus the two
+// facts the Mac app reports (away = locked/display asleep; driven = typed from the phone).
+const phoneAlerts = new PhoneAlerts();
+app.get("/api/phone-alerts", (_req: Request, res: Response) => {
+  res.json(phoneAlerts.state());
+});
+app.put("/api/phone-alerts/sessions/:id", (req: Request, res: Response) => {
+  if (typeof req.body?.enabled !== "boolean") {
+    res.status(400).json({ error: "enabled must be a boolean" });
+    return;
+  }
+  phoneAlerts.setEnabled(String(req.params.id), req.body.enabled);
+  res.json(phoneAlerts.state());
+});
+app.post("/api/phone-alerts/presence", (req: Request, res: Response) => {
+  phoneAlerts.setAway(req.body?.away === true);
+  res.json({ ok: true });
+});
+app.post("/api/phone-alerts/driven", (req: Request, res: Response) => {
+  if (typeof req.body?.sessionId === "string") phoneAlerts.markDriven(req.body.sessionId);
+  res.json({ ok: true });
+});
+
 // Durable subscriptions are also available to CLI skills over local HTTP.
 const subscriptionInput = z.object({
   subscriber: z.string().min(1),
@@ -1530,6 +1554,7 @@ app.listen(port, host, () => {
   const report = (error: unknown) => console.warn("session notifications:", error);
   onSessionEvent((event) => {
     void notifications.publish(event).catch(report);
+    phoneAlerts.onEvent(event);
   });
   onSessionExit((event) => {
     void notifications.publish(event).catch(report);

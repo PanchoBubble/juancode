@@ -168,7 +168,7 @@ public enum CoreProxyServer {
                                 remoteToken: String) throws -> some ApplicationProtocol {
         let upstream = try websocketURL(base: upstreamBaseURL)
         let router = buildRouter(source: source, upstreamBaseURL: upstreamBaseURL)
-        let wsRouter = buildWSRouter(upstream: upstream, globalPause: source.globalPause)
+        let wsRouter = buildWSRouter(upstream: upstream, globalPause: source.globalPause, bindHost: host)
         // Both routers: a refused upgrade falls through to the HTTP router, which refuses too.
         router.add(middleware: RemoteAuth.Middleware(token: remoteToken, bindHost: host))
         wsRouter.add(middleware: RemoteAuth.Middleware(token: remoteToken, bindHost: host))
@@ -211,9 +211,13 @@ public enum CoreProxyServer {
     }
 
     static func buildWSRouter(upstream: URL,
-                              globalPause: GlobalPauseBook?) -> Router<BasicWebSocketRequestContext> {
+                              globalPause: GlobalPauseBook?,
+                              bindHost: String = Config.bindHost) -> Router<BasicWebSocketRequestContext> {
         let wsRouter = Router(context: BasicWebSocketRequestContext.self)
-        wsRouter.ws("/ws") { inbound, outbound, _ in
+        wsRouter.ws("/ws") { inbound, outbound, wsContext in
+            // Only the phone's connection counts as "driven from the phone".
+            let drive: PhoneDrive? = RemoteAuth.isRemote(wsContext.request, bindHost: bindHost)
+                ? PhoneDrive() : nil
             let session = URLSession(configuration: .ephemeral)
             let task = session.webSocketTask(with: upstream)
             task.resume()
@@ -244,8 +248,8 @@ public enum CoreProxyServer {
                 writer.cancel()
             }
             await withTaskGroup(of: Void.self) { group in
-                group.addTask { await pumpUpstream(task, to: cont, globalPause: globalPause) }
-                group.addTask { await pumpDownstream(inbound, to: task, globalPause: globalPause) }
+                group.addTask { await pumpUpstream(task, to: cont, globalPause: globalPause, drive: drive) }
+                group.addTask { await pumpDownstream(inbound, to: task, globalPause: globalPause, drive: drive) }
                 // Whichever direction dies first takes the connection with it: a
                 // half-open relay would leave the sidecar holding a socket that
                 // looks alive and never reconnects.
@@ -275,11 +279,13 @@ public enum CoreProxyServer {
     /// unreachable daemon surfaces: `resume()` never confirms the handshake.
     private static func pumpUpstream(_ task: URLSessionWebSocketTask,
                                      to cont: AsyncStream<Downlink>.Continuation,
-                                     globalPause: GlobalPauseBook?) async {
+                                     globalPause: GlobalPauseBook?,
+                                     drive: PhoneDrive?) async {
         while !Task.isCancelled {
             do {
                 switch try await task.receive() {
                 case .string(let text):
+                    drive?.fromCore(text)
                     // The daemon's own `serverInfo` still reaches the client, with one
                     // capability added: this endpoint answers `pauseAll`/`resumeAll`
                     // itself, and the list has to describe what the endpoint speaks or
@@ -325,11 +331,13 @@ public enum CoreProxyServer {
     /// Client → daemon, minus the two frames this process answers itself.
     private static func pumpDownstream(_ inbound: WebSocketInboundStream,
                                        to task: URLSessionWebSocketTask,
-                                       globalPause: GlobalPauseBook?) async {
+                                       globalPause: GlobalPauseBook?,
+                                       drive: PhoneDrive?) async {
         do {
             for try await message in inbound.messages(maxSize: maxFrameSize) {
                 switch message {
                 case .text(let text):
+                    drive?.fromClient(text)
                     if let driver = servedPause(globalPause)?.driver,
                        let type = frameType(text), type == "pauseAll" || type == "resumeAll" {
                         // Detached: a pause sleeps every live agent and a play spawns

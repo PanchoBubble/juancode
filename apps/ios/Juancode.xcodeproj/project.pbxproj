@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0F24BB5868DC780FCAC47BFC /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32FA03DECE35E3D7BBD33BFA /* Pairing.swift */; };
+		26833A71D5EC5F60FB9563E7 /* AlertsClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7452AB1B81535AA5140E78C /* AlertsClient.swift */; };
 		30D13F1287AC392E77DB6C58 /* Projects.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC91491B0031E2A97D759E2 /* Projects.swift */; };
 		4AD77E9445F3F6C07C02C7EE /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C250597C60ECD2B6EBFDF03 /* RootView.swift */; };
 		552BF8DFC741870A061C1082 /* RemoteCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CBDC4681FB85249DC2F9D9A /* RemoteCore.swift */; };
@@ -33,6 +34,7 @@
 		8D8390040665C9B817270647 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		963542575E530B1992532A39 /* native */ = {isa = PBXFileReference; lastKnownFileType = folder; name = native; path = ../native; sourceTree = SOURCE_ROOT; };
 		9BD0D53211A3407023A4D69E /* Juancode.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Juancode.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B7452AB1B81535AA5140E78C /* AlertsClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertsClient.swift; sourceTree = "<group>"; };
 		EA0DED9560EA80F9B4A82373 /* SessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionView.swift; sourceTree = "<group>"; };
 		EE44E79099AF699D8DAA437C /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -102,6 +104,7 @@
 		DCA19A9739AAD58EE64A1134 /* Connection */ = {
 			isa = PBXGroup;
 			children = (
+				B7452AB1B81535AA5140E78C /* AlertsClient.swift */,
 				32FA03DECE35E3D7BBD33BFA /* Pairing.swift */,
 				6CBDC4681FB85249DC2F9D9A /* RemoteCore.swift */,
 				6E4DF04A2793D0710AA46497 /* SidecarClient.swift */,
@@ -182,6 +185,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				26833A71D5EC5F60FB9563E7 /* AlertsClient.swift in Sources */,
 				82DECEBBE5DB8DC058B75A31 /* JuancodeApp.swift in Sources */,
 				C46612E6514AA54E18F8CBD4 /* NewSessionSheet.swift in Sources */,
 				0F24BB5868DC780FCAC47BFC /* Pairing.swift in Sources */,
