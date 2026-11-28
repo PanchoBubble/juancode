@@ -51,8 +51,8 @@ struct SessionView: View {
                 // Only the status line and "…" share the bar, so the title gets the width for two lines.
                 Text(core.sessions.first { $0.id == sessionId }?.title ?? "")
                     .font(.subheadline.weight(.semibold)).foregroundStyle(Tok.text)
-                    .lineLimit(2).multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
+                    .lineLimit(2).multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             ToolbarItem(placement: .topBarTrailing) { sessionMenu }
         }

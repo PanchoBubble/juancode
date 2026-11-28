@@ -69,7 +69,8 @@ struct RootView: View {
                         Button("Unpair", role: .destructive, action: unpair)
                     } label: {
                         // Connection, then the open session's activity, as one line.
-                        Capsule().fill(statusColor).frame(width: 4, height: 22)
+                        // Hugs the screen edge: the bar's margin would otherwise take title room.
+                        Capsule().fill(statusColor).frame(width: 4, height: 22).padding(.leading, -10)
                     }
                     .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
                 }
