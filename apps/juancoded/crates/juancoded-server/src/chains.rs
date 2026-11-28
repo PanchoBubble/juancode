@@ -36,8 +36,16 @@
 //! join, an untag, a reopen or a restart, so a chain that was just created (empty), a
 //! chain somebody tags already-finished work into, and a chain somebody reopened by
 //! hand all stay open until something in them actually finishes. Nothing reopens a
-//! chain on its own either: a ticket reopened or a session revived is a person's cue to
-//! reopen the chain, not the daemon's.
+//! chain closed that way on its own: a ticket reopened or a session revived is a
+//! person's cue to reopen the chain, not the daemon's.
+//!
+//! ## Idle close (juancode-o3vs)
+//!
+//! Separately, an active chain closes once nothing in it has happened for
+//! [`IDLE_CLOSE_MS`] — no member session turned busy or asked for input, nobody joined
+//! or reopened it — and no member session is busy or waiting for input right now. That
+//! closure is marked idle, and a member session turning busy again reopens it: the
+//! close only tidied the list, so the chain's own activity undoes it.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -48,9 +56,9 @@ use tracing::{debug, info, warn};
 
 use juancoded_core::chain::{
     validate_slug, Chain, ChainMember, ChainMemberKind, ChainState, Handoff, HandoffDelivery,
-    HandoffOwner, HandoffState, MemberStatus,
+    HandoffOwner, HandoffState, MemberStatus, IDLE_CLOSE_MS,
 };
-use juancoded_core::model::{now_ms, SessionMeta, SessionStatus};
+use juancoded_core::model::{now_ms, SessionActivity, SessionMeta, SessionStatus};
 use juancoded_persistence::chain_store::ChainStore;
 use juancoded_state::registry::SessionEvent;
 use juancoded_state::SessionsApi;
@@ -61,6 +69,11 @@ use crate::tracked_prs::{TrackedPrChange, TrackedPrs};
 /// recoverable — the next `subscribeChains` on a reconnect is the whole book — but a
 /// connection that lagged is not resynced on its own, so this is generous.
 const CHANGE_BUFFER: usize = 256;
+
+/// How often the idle rule is checked.
+const IDLE_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Activity closer than this to the last recorded one is not written again.
+const TOUCH_EVERY_MS: i64 = 60_000;
 
 /// One chain moved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -870,8 +883,21 @@ impl Chains {
             // the session finishing again — which would re-close a chain somebody
             // reopened by hand.
             let mut archived = BTreeSet::new();
+            let mut idle_sweep = tokio::time::interval(IDLE_SWEEP_EVERY);
             loop {
-                match events.recv().await {
+                let event = tokio::select! {
+                    event = events.recv() => event,
+                    _ = idle_sweep.tick() => {
+                        chains.close_idle(now_ms());
+                        continue;
+                    }
+                };
+                match event {
+                    Ok(SessionEvent::Activity {
+                        session_id, state, ..
+                    }) if state != SessionActivity::Idle => {
+                        chains.session_active(&session_id, now_ms())
+                    }
                     Ok(SessionEvent::Deleted { session_id, .. }) => {
                         archived.remove(&session_id);
                         chains.forget_session(&session_id)
@@ -898,6 +924,78 @@ impl Chains {
         })
     }
 
+    /// A member session turned busy or asked for input at `now`: reopen its chain if
+    /// the idle rule closed it, else record the activity.
+    pub fn session_active(&self, session_id: &str, now: i64) {
+        let Some(chain) = self
+            .lock()
+            .iter()
+            .find(|c| {
+                c.members
+                    .iter()
+                    .any(|m| m.kind == ChainMemberKind::Session && m.ref_id == session_id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        if chain.state == ChainState::Inactive {
+            if chain.idle_closed {
+                match self.set_state(&chain.slug, ChainState::Active) {
+                    Ok(()) => info!(
+                        chain = chain.slug,
+                        "activity in an idle-closed chain; reopened"
+                    ),
+                    Err(code) => warn!(chain = chain.slug, code, "could not reopen an idle chain"),
+                }
+            }
+            return;
+        }
+        if now - chain.active_at < TOUCH_EVERY_MS {
+            return;
+        }
+        let mut book = self.lock();
+        if let Err(e) = self.store.touch_chain(&chain.slug, now) {
+            warn!(chain = chain.slug, "could not record chain activity: {e:#}");
+            return;
+        }
+        // Daemon-only and not on the wire, so patched in place without a broadcast.
+        if let Some(held) = book.iter_mut().find(|c| c.slug == chain.slug) {
+            held.active_at = held.active_at.max(now);
+        }
+    }
+
+    /// Close every active chain idle for [`IDLE_CLOSE_MS`] at `now`, unless one of its
+    /// member sessions is busy or waiting for input.
+    pub fn close_idle(&self, now: i64) {
+        let idle: Vec<String> = self
+            .lock()
+            .iter()
+            .filter(|c| c.state == ChainState::Active && now - c.last_active() >= IDLE_CLOSE_MS)
+            .filter(|c| {
+                !c.members.iter().any(|m| {
+                    m.kind == ChainMemberKind::Session
+                        && matches!(
+                            self.sessions.activity(&m.ref_id),
+                            Some(SessionActivity::Busy | SessionActivity::WaitingInput)
+                        )
+                })
+            })
+            .map(|c| c.slug.clone())
+            .collect();
+        for slug in idle {
+            let outcome = self.mutate(|store| match store.close_idle_chain(&slug, now) {
+                Ok(true) => Ok(vec![slug.clone()]),
+                Ok(false) => Ok(Vec::new()),
+                Err(e) => Err(store_failed(e)),
+            });
+            match outcome {
+                Ok(()) => info!(chain = slug, "idle for 12h; chain closed"),
+                Err(code) => warn!(chain = slug, code, "could not idle-close a chain"),
+            }
+        }
+    }
+
     fn set_state(&self, slug: &str, state: ChainState) -> Result<(), ChainRefusal> {
         self.mutate(|store| {
             let current = store
@@ -911,7 +1009,13 @@ impl Chains {
             }
             let closed_at = (state == ChainState::Inactive).then(now_ms);
             match store.set_chain_state(slug, state, closed_at) {
-                Ok(true) => Ok(vec![slug.to_string()]),
+                Ok(true) => {
+                    // A reopen is activity, or the idle rule would close it again.
+                    if state == ChainState::Active {
+                        store.touch_chain(slug, now_ms()).map_err(store_failed)?;
+                    }
+                    Ok(vec![slug.to_string()])
+                }
                 Ok(false) => Err("chain-not-found"),
                 Err(e) => Err(store_failed(e)),
             }
@@ -1708,6 +1812,61 @@ mod tests {
         let chain = chains.list()[0].clone();
         assert_eq!(chain.state, ChainState::Inactive);
         assert_eq!(chain.members.len(), 1);
+        let _ = h.sessions.kill(&id);
+    }
+
+    #[tokio::test]
+    async fn an_idle_chain_closes_after_the_threshold_and_its_activity_reopens_it() {
+        let (h, chains) = engine();
+        chains.create("a").unwrap();
+        chains.create("b").unwrap();
+        let id = spawn(&h);
+        chains
+            .set_member(ChainMemberKind::Session, &id, Some("a"), None, None)
+            .unwrap();
+        let start = now_ms();
+        // A just-spawned session may still be busy; the rule must not care about "b".
+        chains.close_idle(start + IDLE_CLOSE_MS - 60_000);
+        assert_eq!(
+            state(&chains, "a"),
+            ChainState::Active,
+            "not idle long enough"
+        );
+
+        chains.session_active(&id, start + 60_000);
+        chains.close_idle(start + IDLE_CLOSE_MS + 30_000);
+        assert_eq!(state(&chains, "b"), ChainState::Inactive, "b was idle");
+        assert_eq!(
+            state(&chains, "a"),
+            ChainState::Active,
+            "a's activity moved its clock"
+        );
+
+        // Session activity is the one read live: wait for the spawn to settle to idle.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while h.sessions.activity(&id) != Some(SessionActivity::Idle)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(h.sessions.activity(&id), Some(SessionActivity::Idle));
+        chains.close_idle(start + 2 * IDLE_CLOSE_MS);
+        assert_eq!(state(&chains, "a"), ChainState::Inactive);
+        chains.session_active(&id, start + 2 * IDLE_CLOSE_MS + 1);
+        assert_eq!(
+            state(&chains, "a"),
+            ChainState::Active,
+            "activity reopens it"
+        );
+
+        // A chain closed by hand is not reopened by activity.
+        chains.close("a").unwrap();
+        chains.session_active(&id, start + 3 * IDLE_CLOSE_MS);
+        assert_eq!(state(&chains, "a"), ChainState::Inactive);
+        // And a manual reopen counts as activity.
+        chains.reopen("b").unwrap();
+        chains.close_idle(now_ms() + IDLE_CLOSE_MS - 60_000);
+        assert_eq!(state(&chains, "b"), ChainState::Active);
         let _ = h.sessions.kill(&id);
     }
 }

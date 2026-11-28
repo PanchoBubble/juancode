@@ -2729,6 +2729,8 @@ mod tests {
             created_at: 1,
             closed_at: Some(2),
             parent: None,
+            active_at: 0,
+            idle_closed: false,
             members: vec![ChainMember {
                 kind: ChainMemberKind::TrackedPr,
                 ref_id: "/repo#7".into(),

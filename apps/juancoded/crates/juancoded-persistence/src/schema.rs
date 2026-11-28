@@ -364,6 +364,12 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE chains ADD COLUMN parent TEXT REFERENCES chains(slug) ON DELETE SET NULL;
     "#,
+    // 21: idle auto-close (juancode-o3vs): the last activity recorded for a chain, and
+    // whether it was closed for being idle, which is what lets activity reopen it.
+    r#"
+    ALTER TABLE chains ADD COLUMN active_at INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE chains ADD COLUMN idle_closed INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

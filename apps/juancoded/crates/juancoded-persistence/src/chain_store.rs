@@ -44,6 +44,10 @@ pub trait ChainStore: Send + Sync {
         state: ChainState,
         closed_at: Option<i64>,
     ) -> Result<bool>;
+    /// Close an active chain as idle (juancode-o3vs). `false` when it was not active.
+    fn close_idle_chain(&self, slug: &str, closed_at: i64) -> Result<bool>;
+    /// Record activity in a chain at `at`; an earlier time than the one held is ignored.
+    fn touch_chain(&self, slug: &str, at: i64) -> Result<()>;
     /// Delete a chain, untagging its members. `false` when there was none.
     fn delete_chain(&self, slug: &str) -> Result<bool>;
     /// Nest `slug` under `parent`, or lift it to the top with `None`. `false` when there
@@ -176,7 +180,7 @@ impl ChainStore for SqliteStore {
     fn chains(&self) -> Result<Vec<Chain>> {
         let conn = self.conn_for_chains();
         let mut stmt = conn.prepare(
-            "SELECT slug, state, created_at, closed_at, id, name, parent FROM chains ORDER BY created_at ASC, slug ASC",
+            "SELECT slug, state, created_at, closed_at, id, name, parent, active_at, idle_closed FROM chains ORDER BY created_at ASC, slug ASC",
         )?;
         let mut chains = stmt
             .query_map([], |row| {
@@ -192,6 +196,8 @@ impl ChainStore for SqliteStore {
                     closed_at: row.get(3)?,
                     members: Vec::new(),
                     parent: row.get(6)?,
+                    active_at: row.get(7)?,
+                    idle_closed: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -253,10 +259,32 @@ impl ChainStore for SqliteStore {
         closed_at: Option<i64>,
     ) -> Result<bool> {
         let updated = self.conn_for_chains().execute(
-            "UPDATE chains SET state = ?2, closed_at = ?3 WHERE slug = ?1",
+            "UPDATE chains SET state = ?2, closed_at = ?3, idle_closed = 0 WHERE slug = ?1",
             params![slug, state.as_str(), closed_at],
         )?;
         Ok(updated > 0)
+    }
+
+    fn close_idle_chain(&self, slug: &str, closed_at: i64) -> Result<bool> {
+        let updated = self.conn_for_chains().execute(
+            "UPDATE chains SET state = ?2, closed_at = ?3, idle_closed = 1 \
+             WHERE slug = ?1 AND state = ?4",
+            params![
+                slug,
+                ChainState::Inactive.as_str(),
+                closed_at,
+                ChainState::Active.as_str()
+            ],
+        )?;
+        Ok(updated > 0)
+    }
+
+    fn touch_chain(&self, slug: &str, at: i64) -> Result<()> {
+        self.conn_for_chains().execute(
+            "UPDATE chains SET active_at = MAX(active_at, ?2) WHERE slug = ?1",
+            params![slug, at],
+        )?;
+        Ok(())
     }
 
     fn delete_chain(&self, slug: &str) -> Result<bool> {

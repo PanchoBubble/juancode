@@ -96,6 +96,10 @@ impl ChainState {
     }
 }
 
+/// How long a chain may go without any activity before the daemon closes it
+/// (juancode-o3vs). Activity in it afterwards reopens it.
+pub const IDLE_CLOSE_MS: i64 = 12 * 60 * 60 * 1000;
+
 /// What a member is. The `ref` that goes with it is the id that kind already has
 /// everywhere else, never one minted for chains:
 ///
@@ -219,6 +223,27 @@ pub struct Chain {
     /// when set, so a client that does not know it sees a top-level chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Epoch ms of the last activity the daemon recorded for it (a member session
+    /// working, a reopen); 0 for none. Daemon-only.
+    #[serde(skip)]
+    pub active_at: i64,
+    /// Closed by the idle rule rather than by hand or by its members finishing, so
+    /// activity in it reopens it. Daemon-only.
+    #[serde(skip)]
+    pub idle_closed: bool,
+}
+
+impl Chain {
+    /// When this chain last showed any sign of life: created, a member joined, or the
+    /// recorded activity — whichever is latest.
+    pub fn last_active(&self) -> i64 {
+        self.members
+            .iter()
+            .map(|m| m.added_at)
+            .chain([self.created_at, self.active_at])
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// Why a slug was refused. The `code` is what goes on the wire.
@@ -397,6 +422,8 @@ mod tests {
             closed_at: None,
             parent: None,
             members: Vec::new(),
+            active_at: 0,
+            idle_closed: false,
         };
         let finished = |_: &ChainMember| MemberStatus::Finished;
         assert!(
