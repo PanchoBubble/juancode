@@ -3,7 +3,7 @@ import SwiftUI
 @main
 struct JuancodeApp: App {
     @State private var core: RemoteCore? = PairingStore.load().map { RemoteCore(pairing: $0) }
-    @State private var selected: String?
+    @AppStorage("lastSession") private var selected: String? // reopened on launch
 
     var body: some Scene {
         WindowGroup {
