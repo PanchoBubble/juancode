@@ -98,25 +98,28 @@ struct ChainDetailView: View {
 
     var body: some View {
         if let chain = core.chains[slug] {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        Text(chain.isActive ? "Active" : "Closed").font(.caption.weight(.semibold))
-                            .foregroundStyle(chain.isActive ? .green : Tok.secondary)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Tok.surface, in: RoundedRectangle(cornerRadius: 5))
-                        Spacer()
-                    }
-                    Picker("View", selection: $asMap.animation(.snappy)) {
-                        Label("Map", systemImage: "point.3.connected.trianglepath.dotted").tag(true)
-                        Label("List", systemImage: "list.bullet").tag(false)
-                    }
-                    .pickerStyle(.segmented)
-                    if asMap { map(chain).transition(.opacity) } else { list(chain).transition(.opacity) }
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text(chain.isActive ? "Active" : "Closed").font(.caption.weight(.semibold))
+                        .foregroundStyle(chain.isActive ? .green : Tok.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Tok.surface, in: RoundedRectangle(cornerRadius: 5))
+                    Spacer()
                 }
-                .padding()
-                .animation(.spring(duration: 0.3), value: chain)
+                .padding(.horizontal)
+                Picker("View", selection: $asMap.animation(.snappy)) {
+                    Label("Map", systemImage: "point.3.connected.trianglepath.dotted").tag(true)
+                    Label("List", systemImage: "list.bullet").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                if asMap {
+                    canvas(chain).transition(.opacity)
+                } else {
+                    ScrollView { list(chain).padding() }.transition(.opacity)
+                }
             }
+            .animation(.spring(duration: 0.3), value: chain)
             .background(Tok.bg)
             .navigationTitle(chain.name)
         } else {
@@ -124,36 +127,54 @@ struct ChainDetailView: View {
         }
     }
 
-    // MARK: Map: orchestrator → roled sessions → tickets/PRs → nested chains, top to bottom.
+    // MARK: Map: a pan/zoom canvas of who dispatched whom (`parentSessionId`), nested chains
+    // under the session that dispatched them; members with no recorded link sit in a row below.
 
-    private func tiers(_ chain: Chain) -> [(label: String, cards: [AnyView])] {
-        let sessions = chain.members.filter { $0.kind == .session }
-        let orchestrators = sessions.filter { $0.role == "orchestrator" }
-        let workers = sessions.filter { $0.role != "orchestrator" }
-        let others = chain.members.filter { $0.kind != .session }
+    private func canvas(_ chain: Chain) -> some View {
+        let members = chain.members
         let nested = core.chains.children(of: chain.slug)
-        return [
-            ("orchestrator", orchestrators.map { AnyView(memberCard($0)) }),
-            ("sessions", workers.map { AnyView(memberCard($0)) }),
-            ("items", others.map { AnyView(memberCard($0)) }),
-            ("nested chains", nested.map { c in AnyView(NavigationLink(value: c.slug) { nestedCard(c) }.buttonStyle(.plain)) }),
-        ].filter { !$0.cards.isEmpty }
-    }
-
-    private func map(_ chain: Chain) -> some View {
-        let tiers = tiers(chain)
-        return VStack(spacing: 0) {
-            ForEach(Array(tiers.enumerated()), id: \.offset) { i, tier in
-                if i > 0 { Rectangle().fill(Tok.surface2).frame(width: 2, height: 22) }
-                Text(tier.label).font(.caption2).foregroundStyle(Tok.secondary)
-                    .padding(.horizontal, 6).padding(.vertical, 2).background(Tok.surface, in: Capsule())
-                Rectangle().fill(Tok.surface2).frame(width: 2, height: 10)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
-                    ForEach(Array(tier.cards.enumerated()), id: \.offset) { $0.element }
+        let sessionKey = { (id: String) in "s:\(id)" }
+        let keys = members.map { $0.kind == .session ? sessionKey($0.ref) : "m:\($0.kind.rawValue):\($0.ref)" }
+            + nested.map { "c:\($0.slug)" }
+        let keySet = Set(keys)
+        var parent: [String: String] = [:]
+        for m in members where m.kind == .session {
+            if let p = core.sessions.first(where: { $0.id == m.ref })?.parentSessionId, keySet.contains(sessionKey(p)) {
+                parent[sessionKey(m.ref)] = sessionKey(p)
+            }
+        }
+        for c in nested {
+            let ids = Set(c.members.filter { $0.kind == .session }.map(\.ref))
+            if let p = core.sessions.first(where: { ids.contains($0.id) && $0.parentSessionId.map { keySet.contains(sessionKey($0)) } == true })?
+                .parentSessionId {
+                parent["c:\(c.slug)"] = sessionKey(p)
+            }
+        }
+        let layout = ChainCanvasLayout(keys: keys, parent: parent)
+        var cards: [String: AnyView] = [:]
+        for (k, m) in zip(keys, members) { cards[k] = AnyView(memberCard(m)) }
+        for c in nested { cards["c:\(c.slug)"] = AnyView(NavigationLink(value: c.slug) { nestedCard(c) }.buttonStyle(.plain)) }
+        return ZoomCanvas(size: layout.size) {
+            ZStack(alignment: .topLeading) {
+                Path { path in
+                    for (child, p) in parent {
+                        guard let a = layout.pos[p], let b = layout.pos[child] else { continue }
+                        let from = CGPoint(x: a.x, y: a.y + ChainCanvasLayout.card.height / 2)
+                        let to = CGPoint(x: b.x, y: b.y - ChainCanvasLayout.card.height / 2)
+                        let mid = (from.y + to.y) / 2
+                        path.move(to: from)
+                        path.addCurve(to: to, control1: CGPoint(x: from.x, y: mid), control2: CGPoint(x: to.x, y: mid))
+                    }
+                }
+                .stroke(Tok.chain.opacity(0.7), lineWidth: 2)
+                ForEach(keys, id: \.self) { k in
+                    if let p = layout.pos[k] {
+                        cards[k].frame(width: ChainCanvasLayout.card.width, height: ChainCanvasLayout.card.height)
+                            .position(p)
+                    }
                 }
             }
         }
-        .frame(maxWidth: .infinity)
     }
 
     private func memberCard(_ m: ChainMember) -> some View {
@@ -177,7 +198,7 @@ struct ChainDetailView: View {
                 }
             }
             .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(waiting ? Tok.waitingBg : Tok.surface, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(waiting ? Tok.waiting : Tok.surface2))
         }
@@ -193,7 +214,7 @@ struct ChainDetailView: View {
             }
         }
         .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Tok.chainBg, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Tok.chain))
     }
@@ -246,6 +267,74 @@ struct ChainDetailView: View {
         case .trackedPr: "tracked PR"
         case .beads: "beads"
         case .linear: "linear"
+        }
+    }
+}
+
+/// Tree layout for the chain canvas: leaves take consecutive columns, a parent centres over its
+/// children, each depth a row. Nodes with neither parent nor children wrap in rows below the trees.
+struct ChainCanvasLayout {
+    static let card = CGSize(width: 170, height: 118)
+    private static let col: CGFloat = 190, row: CGFloat = 170, pad: CGFloat = 20
+
+    var pos: [String: CGPoint] = [:]
+    var size: CGSize = .zero
+
+    init(keys: [String], parent: [String: String]) {
+        var children: [String: [String]] = [:]
+        for k in keys { if let p = parent[k] { children[p, default: []].append(k) } }
+        var slot = 0, maxDepth = -1, placed = Set<String>()
+        func place(_ k: String, _ depth: Int) -> CGFloat {
+            placed.insert(k)
+            maxDepth = max(maxDepth, depth)
+            let kids = (children[k] ?? []).filter { !placed.contains($0) } // a cycle ends here
+            let x: CGFloat
+            if kids.isEmpty { x = CGFloat(slot); slot += 1 } else {
+                let xs = kids.map { place($0, depth + 1) }
+                x = (xs.first! + xs.last!) / 2
+            }
+            pos[k] = CGPoint(x: Self.pad + x * Self.col + Self.card.width / 2,
+                             y: Self.pad + CGFloat(depth) * Self.row + Self.card.height / 2)
+            return x
+        }
+        for k in keys where parent[k] == nil && children[k] != nil { _ = place(k, 0) }
+        let loose = keys.filter { !placed.contains($0) }
+        let cols = max(2, slot)
+        for (i, k) in loose.enumerated() {
+            let r = maxDepth + 1 + i / cols
+            pos[k] = CGPoint(x: Self.pad + CGFloat(i % cols) * Self.col + Self.card.width / 2,
+                             y: Self.pad + CGFloat(r) * Self.row + Self.card.height / 2)
+        }
+        let rows = maxDepth + 1 + (loose.count + cols - 1) / cols
+        let width = CGFloat(max(slot, loose.isEmpty ? 1 : min(cols, loose.count)))
+        size = CGSize(width: 2 * Self.pad + width * Self.col - (Self.col - Self.card.width),
+                      height: 2 * Self.pad + CGFloat(rows) * Self.row - (Self.row - Self.card.height))
+    }
+}
+
+/// Two-axis scroll with pinch zoom (0.3x–2x); opens fitted to the width, never below half size.
+struct ZoomCanvas<Content: View>: View {
+    let size: CGSize
+    @ViewBuilder let content: Content
+    @State private var zoom: CGFloat?
+    @GestureState private var pinch: CGFloat = 1
+
+    var body: some View {
+        GeometryReader { geo in
+            let z = (zoom ?? max(0.5, min(1, geo.size.width / size.width))) * pinch
+            ScrollView([.horizontal, .vertical]) {
+                content
+                    .frame(width: size.width, height: size.height, alignment: .topLeading)
+                    .scaleEffect(z, anchor: .topLeading)
+                    .frame(width: size.width * z, height: size.height * z, alignment: .topLeading)
+            }
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .updating($pinch) { v, state, _ in state = v.magnification }
+                    .onEnded { v in
+                        let base = zoom ?? max(0.5, min(1, geo.size.width / size.width))
+                        zoom = min(2, max(0.3, base * v.magnification))
+                    })
         }
     }
 }
