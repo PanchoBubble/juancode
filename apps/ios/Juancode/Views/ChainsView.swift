@@ -5,13 +5,24 @@ import SwiftUI
 struct ChainsView: View {
     let core: RemoteCore
     let open: (String) -> Void
+    @AppStorage("chainSort") private var byCreation = false
+
+    /// Newest first, by creation or by the latest update of a member session (or creation, if none).
+    private func sorted(_ roots: [Chain]) -> [Chain] {
+        func key(_ c: Chain) -> Int {
+            if byCreation { return c.createdAt }
+            let ids = Set(c.members.filter { $0.kind == .session }.map(\.ref))
+            return core.sessions.filter { ids.contains($0.id) }.map(\.updatedAt).max() ?? c.createdAt
+        }
+        return roots.sorted { key($0) > key($1) }
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    section("ACTIVE", core.chains.outline(core.chains.activeRoots))
-                    section("CLOSED", core.chains.outline(core.chains.chains.filter { !$0.isActive && !core.chains.isNested($0) }))
+                    section("ACTIVE", core.chains.outline(sorted(core.chains.activeRoots)))
+                    section("CLOSED", core.chains.outline(sorted(core.chains.chains.filter { !$0.isActive && !core.chains.isNested($0) })))
                     if core.chains.isEmpty {
                         ContentUnavailableView("No chains", systemImage: "link")
                     }
@@ -23,6 +34,12 @@ struct ChainsView: View {
             .navigationTitle("Chains")
             .navigationDestination(for: String.self) { ChainDetailView(core: core, slug: $0, open: open) }
             .toolbar {
+                Menu {
+                    Picker("Sort", selection: $byCreation) {
+                        Label("Last activity", systemImage: "clock").tag(false)
+                        Label("Created", systemImage: "calendar").tag(true)
+                    }
+                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
                 NavigationLink {
                     PrListView(core: core, open: open).navigationTitle("Tracked PRs")
                 } label: { Label("PRs", systemImage: "arrow.triangle.pull") }
@@ -131,11 +148,9 @@ struct ChainDetailView: View {
                 Text(tier.label).font(.caption2).foregroundStyle(Tok.secondary)
                     .padding(.horizontal, 6).padding(.vertical, 2).background(Tok.surface, in: Capsule())
                 Rectangle().fill(Tok.surface2).frame(width: 2, height: 10)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) { ForEach(Array(tier.cards.enumerated()), id: \.offset) { $0.element } }
-                        .padding(.horizontal, 2)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                    ForEach(Array(tier.cards.enumerated()), id: \.offset) { $0.element }
                 }
-                .scrollClipDisabled()
             }
         }
         .frame(maxWidth: .infinity)
@@ -162,7 +177,7 @@ struct ChainDetailView: View {
                 }
             }
             .padding(10)
-            .frame(width: 170, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(waiting ? Tok.waitingBg : Tok.surface, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(waiting ? Tok.waiting : Tok.surface2))
         }
@@ -178,7 +193,7 @@ struct ChainDetailView: View {
             }
         }
         .padding(10)
-        .frame(width: 170, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Tok.chainBg, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Tok.chain))
     }

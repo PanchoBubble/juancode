@@ -40,7 +40,12 @@ struct SessionView: View {
         }
         .navigationTitle(core.sessions.first { $0.id == sessionId }?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { if core.pairing.oracle != nil { ToolbarItem(placement: .topBarTrailing) { alertsMenu } } }
+        .toolbar {
+            if let session = core.sessions.first(where: { $0.id == sessionId }), session.kind == .agent {
+                ToolbarItem(placement: .topBarTrailing) { ContextMeter(percent: session.usage?.contextPercent) }
+            }
+            if core.pairing.oracle != nil { ToolbarItem(placement: .topBarTrailing) { alertsMenu } }
+        }
         .task { alerts = try? await AlertsClient.fetch(core.pairing) }
         // A dead (killed or vanished) session must not keep the keyboard up: the dock hides under it,
         // leaving no way to leave the session.
