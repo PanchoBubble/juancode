@@ -134,6 +134,9 @@ public final class WireConnection: @unchecked Sendable {
         }
     }
 
+    /// This connection's grid-ownership token from the latest `serverInfo`; a reconnect gets a new one.
+    public var clientId: String? { lock.withLock { handshake?.clientId } }
+
     /// Close for good. Idempotent, and stops the reconnect loop.
     public func stop() {
         let task: URLSessionWebSocketTask? = lock.withLock {

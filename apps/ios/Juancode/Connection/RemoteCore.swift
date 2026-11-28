@@ -16,6 +16,11 @@ final class RemoteCore {
 
     /// Terminal bytes for the attached session: `attached` scrollback, then `output`.
     @ObservationIgnored var onTerminalBytes: ((String, [UInt8]) -> Void)?
+    /// Sessions whose shared grid another client (the Mac) drives, at its cols/rows. The phone's
+    /// resize is denied there, so its terminal must lay out at that grid or the bytes garble.
+    @ObservationIgnored private(set) var foreignGrid: [String: (cols: Int, rows: Int)] = [:]
+    /// Called when a session's `foreignGrid` entry changes; nil means the phone may drive it.
+    @ObservationIgnored var onGrid: ((String, (cols: Int, rows: Int)?) -> Void)?
     /// Called with the id of the session a `create` from this phone produced.
     @ObservationIgnored var onCreated: ((String) -> Void)?
     @ObservationIgnored private var awaitingCreate = false
@@ -85,6 +90,7 @@ final class RemoteCore {
         send(["type": "attach", "sessionId": id, "cols": cols, "rows": rows])
     }
     func resize(_ id: String, cols: Int, rows: Int) {
+        if attachedTo?.id == id { attachedTo = (id, cols, rows) }
         send(["type": "resize", "sessionId": id, "cols": cols, "rows": rows])
     }
     func input(_ id: String, _ text: String) {
@@ -116,7 +122,9 @@ final class RemoteCore {
         Task { await refreshSessions() }
         send(["type": "subscribeTrackedPrs"])
         send(["type": "subscribeChains"])
-        if let a = attachedTo { attach(a.id, cols: a.cols, rows: a.rows) }
+        // A new connection is a new client id; the core re-sends `gridChange` for every owned grid.
+        foreignGrid = [:]
+        if let a = attachedTo { onGrid?(a.id, nil); attach(a.id, cols: a.cols, rows: a.rows) }
     }
 
     private func handle(type: String, data: Data) {
@@ -131,6 +139,9 @@ final class RemoteCore {
             var chains: [Chain]?
             var chain: Chain?
             var slug: String?
+            var owner: String?
+            var cols: Int?
+            var rows: Int?
         }
         guard let f = try? JSONDecoder().decode(Frame.self, from: data) else { return }
         switch type {
@@ -146,6 +157,11 @@ final class RemoteCore {
             }
         case "output":
             if let id = f.sessionId, let bytes = f.data { onTerminalBytes?(id, Array(bytes.utf8)) }
+        case "gridChange":
+            guard let id = f.sessionId, let cols = f.cols, let rows = f.rows else { break }
+            let foreign = f.owner != nil && f.owner != wire?.clientId
+            foreignGrid[id] = foreign ? (cols, rows) : nil
+            onGrid?(id, foreignGrid[id])
         case "exit":
             if let id = f.sessionId, let i = sessions.firstIndex(where: { $0.id == id }) {
                 sessions[i].status = .exited

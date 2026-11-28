@@ -12,6 +12,7 @@ struct SessionView: View {
     @State private var recorder = VoiceRecorder()
     @State private var transcribing = false
     @State private var voiceError: String?
+    @State private var attachments = Attachments()
 
     private static let keyRow: [(label: String, keys: [String]?, text: String?)] = [
         ("Esc", ["Escape"], nil), ("↑", ["Up"], nil), ("↓", ["Down"], nil),
@@ -36,18 +37,22 @@ struct SessionView: View {
             }
             .padding(.vertical, 4)
             if let voiceError { Text(voiceError).font(.caption).foregroundStyle(.red).padding(.horizontal, 8) }
+            AttachmentChips(attachments: attachments)
             HStack {
-                if core.pairing.oracle != nil { micButton }
+                if let oracle = core.pairing.oracle {
+                    AttachButton(attachments: attachments, client: SidecarClient(base: oracle, token: core.pairing.token))
+                    micButton
+                }
                 TextField("Message", text: $line, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
                 Button {
-                    core.input(sessionId, line)
+                    core.input(sessionId, attachments.take(into: line))
                     core.keys(sessionId, ["Enter"])
                     line = ""
                 } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                     .accessibilityLabel("Send")
-                    .disabled(line.isEmpty)
+                    .disabled(attachments.busy || (line.isEmpty && attachments.paths.isEmpty))
             }
             .padding(8)
         }
@@ -111,32 +116,43 @@ struct SessionView: View {
 }
 
 /// SwiftTerm view fed by `attached` + `output`; what it types goes back as `input`.
+///
+/// The pty has one grid, owned by the first client to size it (juancoded `GridState`). When the Mac
+/// owns it the phone's resize is denied, and bytes drawn for the Mac's width garble a phone-width
+/// emulator. So the phone lays its terminal out at the owner's grid and zooms it to fit (pinch to
+/// read); only when the grid is free or its own does it size the pty to the phone.
 private struct TerminalPane: UIViewRepresentable {
     let core: RemoteCore
     let sessionId: String
 
     func makeCoordinator() -> Coordinator { Coordinator(core: core, sessionId: sessionId) }
 
-    func makeUIView(context: Context) -> TerminalView {
+    func makeUIView(context: Context) -> TerminalHost {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
         view.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        context.coordinator.view = view
+        let host = TerminalHost(term: view)
+        host.follow = core.foreignGrid[sessionId]
+        context.coordinator.host = host
         let id = sessionId
         core.onTerminalBytes = { [weak view] sid, bytes in
             guard sid == id else { return }
             view?.feed(byteArray: bytes[...])
         }
-        return view
+        core.onGrid = { [weak coordinator = context.coordinator] sid, grid in
+            guard sid == id else { return }
+            coordinator?.follow(grid)
+        }
+        return host
     }
 
-    func updateUIView(_ view: TerminalView, context: Context) {}
+    func updateUIView(_ view: TerminalHost, context: Context) {}
 
     @MainActor
     final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {
         let core: RemoteCore
         let sessionId: String
-        weak var view: TerminalView?
+        weak var host: TerminalHost?
         private var attached = false
 
         init(core: RemoteCore, sessionId: String) {
@@ -144,14 +160,27 @@ private struct TerminalPane: UIViewRepresentable {
             self.sessionId = sessionId
         }
 
-        /// The first real size attaches; later ones resize.
+        /// Another client took the grid (lay out at it), or it is free or ours again (claim it at
+        /// the phone's size; SwiftTerm only reports a size that changed, so send it explicitly).
+        func follow(_ grid: (cols: Int, rows: Int)?) {
+            guard let host else { return }
+            let wasFollowing = host.follow != nil
+            host.follow = grid
+            host.layoutIfNeeded()
+            if grid == nil, wasFollowing, attached {
+                let t = host.term.terminalDimensions
+                core.resize(sessionId, cols: t.cols, rows: t.rows)
+            }
+        }
+
+        /// The first real size attaches; later ones resize, unless they are the owner's grid we follow.
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             guard newCols > 0, newRows > 0 else { return }
-            if attached {
-                core.resize(sessionId, cols: newCols, rows: newRows)
-            } else {
+            if !attached {
                 attached = true
                 core.attach(sessionId, cols: newCols, rows: newRows)
+            } else if host?.follow == nil {
+                core.resize(sessionId, cols: newCols, rows: newRows)
             }
         }
 
@@ -171,6 +200,56 @@ private struct TerminalPane: UIViewRepresentable {
         }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+/// Holds the terminal. Filling the view while the phone drives the grid; at a foreign grid it is
+/// laid out at that size and zoomed out to fit the width, pinch-zoomable up to the native font.
+final class TerminalHost: UIScrollView, UIScrollViewDelegate {
+    let term: TerminalView
+    var follow: (cols: Int, rows: Int)? { didSet { laidOut = nil; setNeedsLayout() } }
+    /// What the last layout was for, so scroll and zoom passes do not reset the zoom.
+    private var laidOut: (width: CGFloat, cols: Int, rows: Int)?
+
+    init(term: TerminalView) {
+        self.term = term
+        super.init(frame: .zero)
+        delegate = self
+        bouncesZoom = false
+        showsHorizontalScrollIndicator = false
+        backgroundColor = term.nativeBackgroundColor
+        addSubview(term)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { follow == nil ? nil : term }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard let grid = follow else {
+            zoomScale = 1
+            minimumZoomScale = 1
+            maximumZoomScale = 1
+            term.frame = CGRect(origin: .zero, size: bounds.size)
+            contentSize = bounds.size
+            return
+        }
+        if let l = laidOut, l.width == bounds.width, l.cols == grid.cols, l.rows == grid.rows { return }
+        laidOut = (bounds.width, grid.cols, grid.rows)
+        zoomScale = 1
+        let t = term.terminalDimensions
+        if t.cols != grid.cols || t.rows != grid.rows { term.resize(cols: grid.cols, rows: grid.rows) }
+        let exact = term.getOptimalFrameSize().size
+        // Half a cell of slack, so SwiftTerm's own layout pass floors to this same grid.
+        let size = CGSize(width: exact.width + exact.width / CGFloat(grid.cols) / 2,
+                          height: exact.height + exact.height / CGFloat(grid.rows) / 2)
+        term.frame = CGRect(origin: .zero, size: size)
+        contentSize = size
+        minimumZoomScale = min(1, bounds.width / size.width)
+        maximumZoomScale = max(1.5, minimumZoomScale)
+        zoomScale = minimumZoomScale
     }
 }
 
