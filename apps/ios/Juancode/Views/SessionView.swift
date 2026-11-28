@@ -25,6 +25,13 @@ struct SessionView: View {
             TerminalPane(core: core, sessionId: sessionId)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack {
+                    // Resigns whichever holds the keyboard (the field or the terminal); the dock
+                    // comes back on keyboardWillHide.
+                    Button {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    } label: { Image(systemName: "keyboard.chevron.compact.down") }
+                        .buttonStyle(.bordered)
+                        .accessibilityLabel("Hide keyboard")
                     ForEach(Self.keyRow, id: \.label) { k in
                         Button(k.label) {
                             if let keys = k.keys { core.keys(sessionId, keys) }
@@ -131,6 +138,7 @@ private struct TerminalPane: UIViewRepresentable {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
         view.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.keyboardDismissMode = .interactive
         let host = TerminalHost(term: view)
         host.follow = core.foreignGrid[sessionId]
         context.coordinator.host = host
@@ -216,6 +224,7 @@ final class TerminalHost: UIScrollView, UIScrollViewDelegate {
         super.init(frame: .zero)
         delegate = self
         bouncesZoom = false
+        keyboardDismissMode = .interactive
         showsHorizontalScrollIndicator = false
         backgroundColor = term.nativeBackgroundColor
         addSubview(term)
