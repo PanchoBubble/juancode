@@ -151,6 +151,14 @@ private struct TerminalPane: UIViewRepresentable {
         let host = TerminalHost(term: view)
         host.follow = core.foreignGrid[sessionId]
         context.coordinator.host = host
+        // With the keyboard up a tap closes it; SwiftTerm's own tap (focus, clicks) waits for this
+        // one to fail, which it does at once while the keyboard is down.
+        let dismiss = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.dismissKeyboard))
+        dismiss.delegate = context.coordinator
+        view.addGestureRecognizer(dismiss)
+        for case let tap as UITapGestureRecognizer in view.gestureRecognizers ?? [] where tap !== dismiss {
+            tap.require(toFail: dismiss)
+        }
         let id = sessionId
         core.onTerminalBytes = { [weak view] sid, bytes in
             guard sid == id else { return }
@@ -166,16 +174,26 @@ private struct TerminalPane: UIViewRepresentable {
     func updateUIView(_ view: TerminalHost, context: Context) {}
 
     @MainActor
-    final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {
+    final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate, UIGestureRecognizerDelegate {
         let core: RemoteCore
         let sessionId: String
         weak var host: TerminalHost?
         private var attached = false
+        private var keyboardUp = false
 
         init(core: RemoteCore, sessionId: String) {
             self.core = core
             self.sessionId = sessionId
+            super.init()
+            let nc = NotificationCenter.default
+            nc.addObserver(self, selector: #selector(keyboardShown), name: UIResponder.keyboardWillShowNotification, object: nil)
+            nc.addObserver(self, selector: #selector(keyboardHidden), name: UIResponder.keyboardWillHideNotification, object: nil)
         }
+
+        @objc private func keyboardShown() { keyboardUp = true }
+        @objc private func keyboardHidden() { keyboardUp = false }
+        @objc func dismissKeyboard() { host?.window?.endEditing(true) }
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool { keyboardUp }
 
         /// Another client took the grid (lay out at it), or it is free or ours again (claim it at
         /// the phone's size; SwiftTerm only reports a size that changed, so send it explicitly).
