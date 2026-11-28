@@ -12,7 +12,7 @@ struct RootView: View {
     @State private var popover: Popover?
     @State private var oracle = false
     @State private var keyboardUp = false
-    @AppStorage("dockCollapsed") private var dockCollapsed = false
+    @AppStorage("dockHidden") private var dockCollapsed = true
     @State private var chat = OracleChat()
 
     enum Panel: String, Identifiable { case projects, search, chains; var id: String { rawValue } }
@@ -27,7 +27,7 @@ struct RootView: View {
                     SessionView(core: core, sessionId: id).id(id)
                 } else {
                     ContentUnavailableView("No session", systemImage: "terminal",
-                                           description: Text(core.lastError ?? "Pick one from ☰ or ⚡︎."))
+                                           description: Text(core.lastError ?? "Tap ⌃ for actions, then ☰ or ⚡︎."))
                 }
             }
             .toolbar {
@@ -57,7 +57,7 @@ struct RootView: View {
                             if let popover { popoverCard(popover) }
                             ActionDock(core: core, popover: popover) { tap($0) }
                         }
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .transition(.scale(scale: 0.3, anchor: .bottomTrailing).combined(with: .opacity))
                     }
                     dockToggle
                 }
@@ -100,14 +100,16 @@ struct RootView: View {
         return Button {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { popover = nil; dockCollapsed.toggle() }
         } label: {
-            Image(systemName: dockCollapsed ? "chevron.left" : "chevron.right")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Tok.secondary)
-                .frame(width: 52, height: 28)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().stroke(Tok.surface2))
+            Image(systemName: dockCollapsed ? "chevron.up" : "chevron.down")
+                .font(.system(size: 15, weight: .bold)).foregroundStyle(Tok.text)
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Tok.surface2))
+                .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
                 .overlay(alignment: .topTrailing) {
-                    if waiting { Circle().fill(Tok.waiting).frame(width: 8, height: 8).offset(x: -2, y: -2) }
+                    if waiting { Circle().fill(Tok.waiting).frame(width: 10, height: 10) }
                 }
+                .frame(width: 52) // centred under the + button
         }
         .accessibilityLabel(dockCollapsed ? "Show actions" : "Hide actions")
     }
