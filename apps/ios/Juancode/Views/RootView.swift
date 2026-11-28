@@ -100,8 +100,9 @@ struct RootView: View {
         return Button {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { popover = nil; dockCollapsed.toggle() }
         } label: {
-            Image(systemName: dockCollapsed ? "chevron.up" : "chevron.down")
+            Image(systemName: "chevron.up")
                 .font(.system(size: 15, weight: .bold)).foregroundStyle(Tok.text)
+                .rotationEffect(.degrees(dockCollapsed ? 0 : 180)) // spins with the dock's spring
                 .frame(width: 44, height: 44)
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(Circle().stroke(Tok.surface2))
