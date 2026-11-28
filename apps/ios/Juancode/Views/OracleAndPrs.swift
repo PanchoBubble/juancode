@@ -50,6 +50,7 @@ struct OracleChatView: View {
     let core: RemoteCore
     @Bindable var chat: OracleChat
     @State private var draft = ""
+    @State private var attachments = Attachments()
 
     private var client: SidecarClient? {
         core.pairing.oracle.map { SidecarClient(base: $0, token: core.pairing.token) }
@@ -72,15 +73,18 @@ struct OracleChatView: View {
                     }.padding(.horizontal)
                 }
                 Divider()
+                AttachmentChips(attachments: attachments).padding(.top, 4)
                 HStack(alignment: .bottom) {
                     Picker("Agent", selection: $chat.provider) {
                         Text("claude").tag("claude")
                         Text("codex").tag("codex")
                     }.pickerStyle(.menu)
+                    AttachButton(attachments: attachments, client: client)
                     TextField("Ask the Oracle", text: $draft, axis: .vertical).lineLimit(1...4)
                         .textFieldStyle(.roundedBorder)
                     Button { send(client) } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-                        .disabled(chat.busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(chat.busy || attachments.busy
+                                  || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.paths.isEmpty))
                 }.padding()
             }
         } else {
@@ -90,7 +94,7 @@ struct OracleChatView: View {
     }
 
     private func send(_ client: SidecarClient) {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = attachments.take(into: draft.trimmingCharacters(in: .whitespacesAndNewlines))
         draft = ""
         Task { await chat.send(text, client: client) }
     }

@@ -33,6 +33,28 @@ struct SidecarClient: Sendable {
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["text"] as? String ?? ""
     }
 
+    /// Raw bytes to the Mac (`POST /api/uploads?name=`); returns the saved file's path there,
+    /// which goes into the message so the agent on the Mac reads it.
+    func upload(_ data: Data, name: String) async throws -> String {
+        var comps = URLComponents(url: base.appending(path: "api/uploads"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "name", value: name)]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 300
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let (body, resp) = try await URLSession.shared.upload(for: req, from: data)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200,
+              let path = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["path"] as? String
+        else {
+            throw Failure(errorDescription: status == 401
+                ? "The sidecar rejected the pairing token. Scan the QR again."
+                : "Upload failed (\(status)).")
+        }
+        return path
+    }
+
     func chat(text: String, sessionId: String?, provider: String) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { cont in
             let task = Task {

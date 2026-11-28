@@ -24,9 +24,11 @@
 		AC585999725BA38C3AAF1FF2 /* SessionRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 718FFDA3C85E0BF6A6143FBF /* SessionRow.swift */; };
 		B0FE16AE027BBACA642ADEC4 /* JuancodeWire in Frameworks */ = {isa = PBXBuildFile; productRef = 72C1E44699346B52934B8944 /* JuancodeWire */; };
 		CE8B043EB36FAB720177D1D4 /* NewSessionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED3810C80663851DC27EDCB /* NewSessionCard.swift */; };
+		E0040F059E977901F92934E0 /* Attachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 201F753D6B549072EF5023EE /* Attachments.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		201F753D6B549072EF5023EE /* Attachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Attachments.swift; sourceTree = "<group>"; };
 		32FA03DECE35E3D7BBD33BFA /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		4125BC3339EDF426B3F83D27 /* JuancodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuancodeApp.swift; sourceTree = "<group>"; };
 		5C250597C60ECD2B6EBFDF03 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -84,6 +86,7 @@
 		5955EB48A321E1A1152EFA57 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				201F753D6B549072EF5023EE /* Attachments.swift */,
 				CA6975CC1A6B01D5701B1C82 /* ChainsView.swift */,
 				6ED3810C80663851DC27EDCB /* NewSessionCard.swift */,
 				D2A8917B319F46139EAD7D7D /* OracleAndPrs.swift */,
@@ -211,6 +214,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				26833A71D5EC5F60FB9563E7 /* AlertsClient.swift in Sources */,
+				E0040F059E977901F92934E0 /* Attachments.swift in Sources */,
 				66449FC3732BF3C67BCDE430 /* ChainsView.swift in Sources */,
 				82DECEBBE5DB8DC058B75A31 /* JuancodeApp.swift in Sources */,
 				CE8B043EB36FAB720177D1D4 /* NewSessionCard.swift in Sources */,
