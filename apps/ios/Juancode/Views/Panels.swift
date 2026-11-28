@@ -49,9 +49,10 @@ struct ProjectsView: View {
     let open: (String) -> Void
     @State private var query = ""
     @State private var searching = true
+    @AppStorage("showOldSessions") private var showOld = false
 
     private var projects: [ProjectGroup] {
-        let all = ProjectGroup.group(core.sessions)
+        let all = ProjectGroup.group(core.sessions, recentOnly: !showOld)
         return query.isEmpty ? all : all.filter { $0.path.localizedCaseInsensitiveContains(query) }
     }
 
@@ -80,6 +81,10 @@ struct ProjectsView: View {
             .animation(.default, value: projects.map(\.id))
             .searchable(text: $query, isPresented: $searching, prompt: "Search projects")
             .navigationTitle("Projects")
+            .toolbar {
+                Toggle(isOn: $showOld) { Label("Older than 2 weeks", systemImage: "clock.arrow.circlepath") }
+                    .toggleStyle(.button)
+            }
             .navigationDestination(for: String.self) { ProjectSessionsView(core: core, path: $0, open: open) }
             // Not .refreshable: pull-to-refresh fought the sheet's drag-to-dismiss.
             .task { await core.refreshSessions() }
@@ -93,9 +98,10 @@ struct ProjectSessionsView: View {
     let path: String
     let open: (String) -> Void
     @State private var newSession = false
+    @AppStorage("showOldSessions") private var showOld = false
 
     private var sessions: [SessionMeta] {
-        ProjectGroup.group(core.sessions).first { $0.path == path }?.sessions ?? []
+        ProjectGroup.group(core.sessions, recentOnly: !showOld).first { $0.path == path }?.sessions ?? []
     }
 
     var body: some View {

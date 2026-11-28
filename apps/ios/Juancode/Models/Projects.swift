@@ -8,8 +8,10 @@ struct ProjectGroup: Identifiable {
     var name: String { (path as NSString).lastPathComponent }
     var sessions: [SessionMeta]
 
-    static func group(_ sessions: [SessionMeta]) -> [ProjectGroup] {
-        let live = sessions.filter { $0.kind == .agent && !$0.archived }
+    /// `recentOnly` drops sessions untouched for two weeks (the default view; the rest are noise).
+    static func group(_ sessions: [SessionMeta], recentOnly: Bool = false) -> [ProjectGroup] {
+        let cutoff = recentOnly ? Int(Date().timeIntervalSince1970 * 1000) - 14 * 86_400_000 : Int.min
+        let live = sessions.filter { $0.kind == .agent && !$0.archived && $0.updatedAt >= cutoff }
         return Dictionary(grouping: live, by: \.projectPath)
             .map { ProjectGroup(path: $0.key, sessions: $0.value.sorted { $0.updatedAt > $1.updatedAt }) }
             .sorted { ($0.sessions.first?.updatedAt ?? 0) > ($1.sessions.first?.updatedAt ?? 0) }
