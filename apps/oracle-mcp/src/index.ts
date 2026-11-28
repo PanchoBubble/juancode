@@ -22,6 +22,7 @@ import { loadEnvFile } from "./load-env.ts";
 const loaded = loadEnvFile(join(dirname(fileURLToPath(import.meta.url)), "..", ".env"));
 if (loaded.length) console.log(`oracle-mcp: loaded ${loaded.length} var(s) from .env`);
 import express, { type Request, type Response } from "express";
+import { codexChatStream } from "./chat-codex.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -1306,7 +1307,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
 // when SSE is unavailable (old browser, or a proxy that buffers the stream). Auth is
 // the same Cloudflare Access cookie as every other route.
 app.post("/api/chat/stream", async (req: Request, res: Response) => {
-  const { text, sessionId } = req.body ?? {};
+  const { text, sessionId, provider } = req.body ?? {};
   if (typeof text !== "string" || !text.trim()) {
     res.status(400).send("text is required");
     return;
@@ -1327,12 +1328,12 @@ app.post("/api/chat/stream", async (req: Request, res: Response) => {
   const ac = new AbortController();
   res.on("close", () => ac.abort());
   try {
-    const done = await oracleChatStream(
-      text,
-      typeof sessionId === "string" ? sessionId : null,
-      (chunk) => sse("delta", { text: chunk }),
-      ac.signal,
-    );
+    const sid = typeof sessionId === "string" ? sessionId : null;
+    const onDelta = (chunk: string) => sse("delta", { text: chunk });
+    const done =
+      provider === "codex"
+        ? await codexChatStream(text, sid, onDelta)
+        : await oracleChatStream(text, sid, onDelta, ac.signal);
     sse("done", { sessionId: done.sessionId, isError: done.isError });
   } catch (e) {
     sse("error", { message: e instanceof Error ? e.message : String(e) });
