@@ -11,6 +11,7 @@
 		26833A71D5EC5F60FB9563E7 /* AlertsClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7452AB1B81535AA5140E78C /* AlertsClient.swift */; };
 		30D13F1287AC392E77DB6C58 /* Projects.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC91491B0031E2A97D759E2 /* Projects.swift */; };
 		3BDE6C9EA1E5336B394D4B61 /* Panels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F705320D62EDC92549A406 /* Panels.swift */; };
+		49F2F0C7FC05E23AA6EF2B0E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F90C2C0D23DE409883206B50 /* Assets.xcassets */; };
 		4AD77E9445F3F6C07C02C7EE /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C250597C60ECD2B6EBFDF03 /* RootView.swift */; };
 		552BF8DFC741870A061C1082 /* RemoteCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CBDC4681FB85249DC2F9D9A /* RemoteCore.swift */; };
 		562E64CB89794C0684BDED5C /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = DD356DF494E488527EF15A8D /* SwiftTerm */; };
@@ -43,6 +44,7 @@
 		D2A8917B319F46139EAD7D7D /* OracleAndPrs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OracleAndPrs.swift; sourceTree = "<group>"; };
 		EA0DED9560EA80F9B4A82373 /* SessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionView.swift; sourceTree = "<group>"; };
 		EE44E79099AF699D8DAA437C /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
+		F90C2C0D23DE409883206B50 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,6 +71,7 @@
 		4600B9F22D7FC4F21A413BBA /* Juancode */ = {
 			isa = PBXGroup;
 			children = (
+				F90C2C0D23DE409883206B50 /* Assets.xcassets */,
 				8D8390040665C9B817270647 /* Info.plist */,
 				4125BC3339EDF426B3F83D27 /* JuancodeApp.swift */,
 				DCA19A9739AAD58EE64A1134 /* Connection */,
@@ -137,6 +140,7 @@
 			buildConfigurationList = 17534060F7C43DDBE0831871 /* Build configuration list for PBXNativeTarget "Juancode" */;
 			buildPhases = (
 				861B7982F63227AD961E9236 /* Sources */,
+				63E120682E907828F480B660 /* Resources */,
 				ED7802B57D70E1400C74E360 /* Frameworks */,
 			);
 			buildRules = (
@@ -189,6 +193,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		63E120682E907828F480B660 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				49F2F0C7FC05E23AA6EF2B0E /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		861B7982F63227AD961E9236 /* Sources */ = {

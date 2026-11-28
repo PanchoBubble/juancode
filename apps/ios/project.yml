@@ -28,6 +28,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: WC72R44Z87
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Juancode/Info.plist
       properties:
