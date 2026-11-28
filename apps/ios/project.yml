@@ -1,0 +1,39 @@
+# XcodeGen spec for the iOS app (juancode-3aq8.4). `xcodegen` regenerates
+# Juancode.xcodeproj; both are checked in so a plain Xcode open works.
+name: Juancode
+options:
+  bundleIdPrefix: com.juanone
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  JuancodeNative:
+    path: ../native
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm.git
+    exactVersion: 1.99.1 # must match apps/native/Package.swift
+targets:
+  Juancode:
+    type: application
+    platform: iOS
+    sources: [Juancode]
+    dependencies:
+      - package: JuancodeNative
+        product: JuancodeWire
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.juanone.juancode.ios
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Juancode/Info.plist
+      properties:
+        CFBundleDisplayName: juancode
+        UILaunchScreen: {}
+        NSCameraUsageDescription: Scan the pairing QR from juancode Settings → Phone.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.juanone.juancode
+            CFBundleURLSchemes: [juancode]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
