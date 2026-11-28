@@ -152,7 +152,8 @@ public enum CoreProxyServer {
         handleSignals: Bool = false
     ) async throws {
         let app = try makeApplication(source: source, upstreamBaseURL: upstreamBaseURL,
-                                      host: host, port: port)
+                                      host: host, port: port,
+                                      remoteToken: RemoteAuth.loadOrCreateToken())
         if handleSignals {
             try await app.runService()
         } else {
@@ -163,12 +164,17 @@ public enum CoreProxyServer {
     /// The whole application, built but not started, so a test can drive the same
     /// object `run` does instead of a rebuilt approximation of it.
     static func makeApplication(source: Source, upstreamBaseURL: String,
-                                host: String, port: Int) throws -> some ApplicationProtocol {
+                                host: String, port: Int,
+                                remoteToken: String) throws -> some ApplicationProtocol {
         let upstream = try websocketURL(base: upstreamBaseURL)
+        let router = buildRouter(source: source, upstreamBaseURL: upstreamBaseURL)
+        let wsRouter = buildWSRouter(upstream: upstream, globalPause: source.globalPause)
+        // Both routers: a refused upgrade falls through to the HTTP router, which refuses too.
+        router.add(middleware: RemoteAuth.Middleware(token: remoteToken, bindHost: host))
+        wsRouter.add(middleware: RemoteAuth.Middleware(token: remoteToken, bindHost: host))
         return Application(
-            router: buildRouter(source: source, upstreamBaseURL: upstreamBaseURL),
-            server: .http1WebSocketUpgrade(
-                webSocketRouter: buildWSRouter(upstream: upstream, globalPause: source.globalPause)),
+            router: router,
+            server: .http1WebSocketUpgrade(webSocketRouter: wsRouter),
             configuration: .init(address: .hostname(host, port: port), serverName: "juancode")
         )
     }

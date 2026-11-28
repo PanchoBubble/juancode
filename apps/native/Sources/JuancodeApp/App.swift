@@ -608,6 +608,8 @@ struct JuancodeApp: App {
                 AppearanceSettingsView()
                     .environment(model)
                     .tabItem { Label("Appearance", systemImage: "circle.lefthalf.filled") }
+                PairingSettingsView()
+                    .tabItem { Label("Phone", systemImage: "iphone") }
             }
         }
     }

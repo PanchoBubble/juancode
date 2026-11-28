@@ -290,7 +290,7 @@ final class CoreProxyServerTests: XCTestCase {
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
                 upstreamBaseURL: Self.liveURL("http", daemonPort),
-                host: "127.0.0.1", port: 0)
+                host: "127.0.0.1", port: 0, remoteToken: "t")
             try await proxy.test(.live) { proxyClient in
                 let proxyPort = try XCTUnwrap(proxyClient.port)
                 let session = URLSession(configuration: .ephemeral)
@@ -338,7 +338,7 @@ final class CoreProxyServerTests: XCTestCase {
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
                 upstreamBaseURL: Self.liveURL("http", daemonPort),
-                host: "127.0.0.1", port: 0)
+                host: "127.0.0.1", port: 0, remoteToken: "t")
             try await proxy.test(.live) { proxyClient in
                 let proxyPort = try XCTUnwrap(proxyClient.port)
                 let task = URLSession(configuration: .ephemeral)
@@ -394,7 +394,7 @@ final class CoreProxyServerTests: XCTestCase {
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
                 upstreamBaseURL: Self.liveURL("http", daemonPort),
-                host: "127.0.0.1", port: 0)
+                host: "127.0.0.1", port: 0, remoteToken: "t")
             try await proxy.test(.live) { client in
                 for leaf in CoreProxyServer.sessionReadLeaves {
                     try await client.execute(uri: "/api/sessions/s1/\(leaf)", method: .get) { res in
@@ -419,7 +419,7 @@ final class CoreProxyServerTests: XCTestCase {
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
                 upstreamBaseURL: Self.liveURL("http", daemonPort),
-                host: "127.0.0.1", port: 0)
+                host: "127.0.0.1", port: 0, remoteToken: "t")
             try await proxy.test(.live) { client in
                 try await client.execute(uri: "/api/sessions/s1/messages?limit=7", method: .get) { res in
                     XCTAssertEqual((Self.json(res) as? [String: Any])?["query"] as? String, "limit=7")
@@ -438,7 +438,7 @@ final class CoreProxyServerTests: XCTestCase {
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
                 upstreamBaseURL: Self.liveURL("http", daemonPort),
-                host: "127.0.0.1", port: 0)
+                host: "127.0.0.1", port: 0, remoteToken: "t")
             try await proxy.test(.live) { client in
                 try await client.execute(uri: "/api/sessions/s%2F1/scrollback", method: .get) { res in
                     XCTAssertEqual(res.status, .ok)
@@ -458,7 +458,7 @@ final class CoreProxyServerTests: XCTestCase {
             let proxy = try CoreProxyServer.makeApplication(
                 source: mirror.source(),
                 upstreamBaseURL: Self.liveURL("http", daemonPort),
-                host: "127.0.0.1", port: 0)
+                host: "127.0.0.1", port: 0, remoteToken: "t")
             try await proxy.test(.live) { client in
                 try await client.execute(uri: "/api/sessions/s1/transcript", method: .get) { res in
                     XCTAssertEqual(res.status, .notFound)
@@ -473,7 +473,7 @@ final class CoreProxyServerTests: XCTestCase {
         let mirror = FakeMirror([Self.meta("s1")])
         let proxy = try CoreProxyServer.makeApplication(
             source: mirror.source(), upstreamBaseURL: "http://127.0.0.1:1",
-            host: "127.0.0.1", port: 0)
+            host: "127.0.0.1", port: 0, remoteToken: "t")
         try await proxy.test(.live) { client in
             try await client.execute(uri: "/api/sessions/s1/scrollback", method: .get) { res in
                 XCTAssertEqual(res.status, .badGateway)
@@ -488,7 +488,7 @@ final class CoreProxyServerTests: XCTestCase {
         // Port 1 on loopback: privileged and unbound, so the connect fails fast.
         let proxy = try CoreProxyServer.makeApplication(
             source: mirror.source(), upstreamBaseURL: "http://127.0.0.1:1",
-            host: "127.0.0.1", port: 0)
+            host: "127.0.0.1", port: 0, remoteToken: "t")
         try await proxy.test(.live) { proxyClient in
             let proxyPort = try XCTUnwrap(proxyClient.port)
             let session = URLSession(configuration: .ephemeral)

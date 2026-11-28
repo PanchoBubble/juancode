@@ -65,6 +65,7 @@ import { consoleHtml, iconPng, webManifest } from "./ui.ts";
 import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { KEY_NAMES, unknownKey, unknownKeyMessage } from "./keys.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
+import { loadOrCreateToken, remoteAuth } from "./remote-auth.ts";
 import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
 import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
 import {
@@ -737,6 +738,8 @@ const app = express();
 // Registered before the global json parser: the route needs the raw bytes for
 // HMAC verification, and express.json() would consume application/json streams.
 registerGithubWebhook(app);
+// After the webhook (HMAC-verified on its own), before every other route.
+app.use(remoteAuth(loadOrCreateToken()));
 app.use(express.json());
 
 app.get("/healthz", (_req: Request, res: Response) => {

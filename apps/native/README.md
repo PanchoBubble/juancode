@@ -209,6 +209,26 @@ scrolled off between polls are searched too. `idleMs` means no pty output for
 that window — deliberately NOT the provider heuristic (`ActivityDetector`), which
 answers a different question.
 
+### Phone access over Tailscale (`juancode-3aq8.3`)
+
+Both servers stay bound to `127.0.0.1`; `tailscale serve` publishes them on your
+tailnet only (not Funnel):
+
+```sh
+tailscale serve --bg --https=443  http://127.0.0.1:4280   # relay (/ws + REST)
+tailscale serve --bg --https=8443 http://127.0.0.1:4281   # oracle sidecar
+tailscale serve status                                    # check; `tailscale serve reset` undoes
+```
+
+Use HTTP mode as above, never `--tcp`: the servers spot a remote client by the
+proxy headers `tailscale serve` adds (`X-Forwarded-For`, `Tailscale-*`) or a
+non-loopback Host, and a raw TCP forward would look local. Remote clients must
+send the pairing token from `~/.juancode/remote-token` (minted on first launch,
+`0600`) as `Authorization: Bearer <token>` or `?token=<token>`; loopback clients
+(the app, the sidecar, scripts) need none. Settings → Phone shows a QR
+(`juancode://pair?server=…&oracle=…&token=…`) for the iOS app. Delete the file
+and relaunch both to rotate it.
+
 ## `JuancodeApp` — the SwiftUI shell (`juancode-u34.4`)
 
 The native app (`swift run juancode`): the local shell AND the host of the relay.
