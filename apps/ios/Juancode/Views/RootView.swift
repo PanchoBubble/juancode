@@ -12,6 +12,11 @@ struct RootView: View {
     @State private var popover: Popover?
     @State private var oracle = false
     @AppStorage("dockHidden") private var dockCollapsed = true
+    // Where the dock was dragged to, from its bottom-right home (press and hold, then drag).
+    @AppStorage("dockX") private var dockX = 0.0
+    @AppStorage("dockY") private var dockY = 0.0
+    @GestureState private var drag = CGSize.zero
+    @State private var lifted = false
     @State private var chat = OracleChat()
 
     enum Panel: String, Identifiable { case projects, search, chains; var id: String { rawValue } }
@@ -50,11 +55,14 @@ struct RootView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            VStack(alignment: .trailing, spacing: 8) {
+            // On the left half the popover opens to the dock's right, so it stays on screen.
+            let flipped = dockX < -Double(UIScreen.main.bounds.width) / 2
+            VStack(alignment: flipped ? .leading : .trailing, spacing: 8) {
                 if !dockCollapsed {
                     HStack(alignment: .bottom, spacing: 10) {
-                        if let popover { popoverCard(popover) }
+                        if !flipped, let popover { popoverCard(popover) }
                         ActionDock(core: core, popover: popover, hasSession: selected != nil) { tap($0) }
+                        if flipped, let popover { popoverCard(popover) }
                     }
                     .transition(.scale(scale: 0.3, anchor: .bottomTrailing).combined(with: .opacity))
                 }
@@ -62,6 +70,10 @@ struct RootView: View {
             }
             .padding(.trailing, 12)
             .padding(.bottom, 72) // clear the input bar; rides above the keyboard with it
+            .scaleEffect(lifted ? 1.04 : 1)
+            .offset(x: dockX + drag.width, y: dockY + drag.height)
+            .simultaneousGesture(moveDock)
+            .sensoryFeedback(.impact, trigger: lifted) { _, up in up }
         }
         .sheet(item: $panel) { p in
             Group {
@@ -86,6 +98,25 @@ struct RootView: View {
             if popover != .keys { withAnimation(.snappy) { popover = nil } }
         }
         .task { core.start() }
+    }
+
+    private var moveDock: some Gesture {
+        LongPressGesture(minimumDuration: 0.35)
+            .sequenced(before: DragGesture(coordinateSpace: .global))
+            .updating($drag) { value, state, _ in
+                if case .second(true, let d?) = value { state = d.translation }
+            }
+            .onChanged { value in
+                if case .second(true, _) = value, !lifted { withAnimation(.snappy) { lifted = true } }
+            }
+            .onEnded { value in
+                withAnimation(.snappy) { lifted = false }
+                guard case .second(true, let d?) = value else { return }
+                // shortcut: clamps to the screen size, not the safe area; good enough for a phone.
+                let b = UIScreen.main.bounds
+                dockX = min(0, max(-Double(b.width) + 80, dockX + d.translation.width))
+                dockY = min(0, max(-Double(b.height) + 260, dockY + d.translation.height))
+            }
     }
 
     /// Always on screen so the dock can come back; a dot stands in for the hidden waiting badge.
