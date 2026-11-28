@@ -33,10 +33,11 @@ describe("phone alerts", () => {
     alerts.markDriven("b");
     alerts.onEvent(waiting("b"));
     alerts.onEvent(waiting("c", false)); // connect-time snapshot
+    alerts.onEvent({ ...waiting("d"), dispatchId: "phone-1" }); // created from the phone
     alerts.setEnabled("b", false);
     alerts.onEvent({ sessionId: "b", state: "busy", notify: false });
     alerts.onEvent(waiting("b"));
-    expect(sent).toEqual(["a", "b"]);
+    expect(sent).toEqual(["a", "b", "d"]);
     // topic and mutes survive a restart
     const again = new PhoneAlerts(path);
     expect(again.state()).toMatchObject({ topic: alerts.topic, muted: ["b"] });

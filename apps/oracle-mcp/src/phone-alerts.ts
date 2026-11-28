@@ -74,7 +74,10 @@ export class PhoneAlerts {
     const entered = this.lastState.get(ev.sessionId) !== "waiting_input";
     this.lastState.set(ev.sessionId, ev.state);
     if (ev.state !== "waiting_input" || !ev.notify || !entered) return;
-    if (this.muted.has(ev.sessionId) || !(this.away || this.driven.has(ev.sessionId))) return;
+    // The phone tags the sessions it creates with a "phone-" dispatchId.
+    const phoneMade = ev.dispatchId?.startsWith("phone-") === true;
+    if (this.muted.has(ev.sessionId) || !(this.away || phoneMade || this.driven.has(ev.sessionId)))
+      return;
     void this.send(this.topic, ev.sessionId).catch((e) =>
       console.warn("phone alert failed:", e instanceof Error ? e.message : e),
     );
