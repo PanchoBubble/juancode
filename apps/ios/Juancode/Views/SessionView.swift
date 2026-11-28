@@ -147,7 +147,7 @@ private struct TerminalPane: UIViewRepresentable {
         let view = TerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
         view.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        view.keyboardDismissMode = .interactive
+        view.keyboardDismissMode = .onDrag
         let host = TerminalHost(term: view)
         host.follow = core.foreignGrid[sessionId]
         context.coordinator.host = host
@@ -251,7 +251,7 @@ final class TerminalHost: UIScrollView, UIScrollViewDelegate {
         super.init(frame: .zero)
         delegate = self
         bouncesZoom = false
-        keyboardDismissMode = .interactive
+        keyboardDismissMode = .onDrag
         showsHorizontalScrollIndicator = false
         backgroundColor = term.nativeBackgroundColor
         addSubview(term)
