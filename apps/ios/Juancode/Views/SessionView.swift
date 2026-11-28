@@ -2,8 +2,8 @@ import SwiftTerm
 import AVFoundation
 import SwiftUI
 
-/// One session: the terminal, a key row for what the soft keyboard lacks, and an
-/// input bar that sends a line plus Enter.
+/// One session: the terminal and an input bar that sends a line plus Enter. Keys the soft
+/// keyboard lacks live in the dock's Keys popover (`KeyPad`).
 struct SessionView: View {
     let core: RemoteCore
     let sessionId: String
@@ -14,35 +14,9 @@ struct SessionView: View {
     @State private var voiceError: String?
     @State private var attachments = Attachments()
 
-    private static let keyRow: [(label: String, keys: [String]?, text: String?)] = [
-        ("Esc", ["Escape"], nil), ("↑", ["Up"], nil), ("↓", ["Down"], nil),
-        ("←", ["Left"], nil), ("→", ["Right"], nil), ("^C", ["C-c"], nil),
-        ("Tab", ["Tab"], nil), ("y", nil, "y"), ("n", nil, "n"),
-    ]
-
     var body: some View {
         VStack(spacing: 0) {
             TerminalPane(core: core, sessionId: sessionId)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack {
-                    // Resigns whichever holds the keyboard (the field or the terminal); the dock
-                    // comes back on keyboardWillHide.
-                    Button {
-                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                    } label: { Image(systemName: "keyboard.chevron.compact.down") }
-                        .buttonStyle(.bordered)
-                        .accessibilityLabel("Hide keyboard")
-                    ForEach(Self.keyRow, id: \.label) { k in
-                        Button(k.label) {
-                            if let keys = k.keys { core.keys(sessionId, keys) }
-                            if let text = k.text { core.input(sessionId, text) }
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
-                .padding(.horizontal, 8)
-            }
-            .padding(.vertical, 4)
             if let voiceError { Text(voiceError).font(.caption).foregroundStyle(.red).padding(.horizontal, 8) }
             AttachmentChips(attachments: attachments)
             HStack(alignment: .bottom, spacing: 6) {

@@ -16,7 +16,7 @@ struct RootView: View {
     @State private var chat = OracleChat()
 
     enum Panel: String, Identifiable { case projects, search, chains; var id: String { rawValue } }
-    enum Popover { case new, active }
+    enum Popover { case new, active, keys }
 
     private var current: SessionMeta? { core.sessions.first { $0.id == selected } }
 
@@ -55,14 +55,14 @@ struct RootView: View {
                     if !dockCollapsed {
                         HStack(alignment: .bottom, spacing: 10) {
                             if let popover { popoverCard(popover) }
-                            ActionDock(core: core, popover: popover) { tap($0) }
+                            ActionDock(core: core, popover: popover, hasSession: selected != nil) { tap($0) }
                         }
                         .transition(.scale(scale: 0.3, anchor: .bottomTrailing).combined(with: .opacity))
                     }
                     dockToggle
                 }
                 .padding(.trailing, 12)
-                .padding(.bottom, 96) // clear the key row and input bar
+                .padding(.bottom, 72) // clear the input bar
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
@@ -120,6 +120,7 @@ struct RootView: View {
             switch item {
             case .new: popover = popover == .new ? nil : .new
             case .active: popover = popover == .active ? nil : .active
+            case .keys: popover = popover == .keys ? nil : .keys
             case .projects: popover = nil; panel = .projects
             case .search: popover = nil; panel = .search
             case .chains: popover = nil; panel = .chains
@@ -141,6 +142,8 @@ struct RootView: View {
                                open: open, openOracle: { popover = nil; oracle = true })
             case .active:
                 ActiveList(core: core, open: open)
+            case .keys:
+                if let selected { KeyPad(core: core, sessionId: selected) }
             }
         }
         .padding(14)
@@ -156,9 +159,10 @@ struct RootView: View {
 struct ActionDock: View {
     let core: RemoteCore
     let popover: RootView.Popover?
+    let hasSession: Bool
     let tap: (Item) -> Void
 
-    enum Item { case chains, search, active, projects, new }
+    enum Item { case chains, search, active, projects, keys, new }
 
     var body: some View {
         let waiting = core.sessions.filter(core.isWaiting).count
@@ -177,6 +181,7 @@ struct ActionDock: View {
                     }
                     .animation(.spring, value: waiting)
                 button(.projects, "line.3.horizontal", "Projects")
+                if hasSession { button(.keys, "command", "Keys", selected: popover == .keys) }
             }
             .padding(4)
             .background(.ultraThinMaterial, in: Capsule())
@@ -199,5 +204,33 @@ struct ActionDock: View {
                 .background(selected ? Tok.surface2 : .clear, in: Circle())
         }
         .accessibilityLabel(label)
+    }
+}
+
+/// Keys the soft keyboard lacks, for the open session. Stays open so arrows can be pressed repeatedly.
+struct KeyPad: View {
+    let core: RemoteCore
+    let sessionId: String
+
+    private static let keys: [(label: String, keys: [String]?, text: String?)] = [
+        ("Esc", ["Escape"], nil), ("↑", ["Up"], nil), ("^C", ["C-c"], nil), ("Tab", ["Tab"], nil),
+        ("←", ["Left"], nil), ("↓", ["Down"], nil), ("→", ["Right"], nil), ("⏎", ["Enter"], nil),
+        ("y", nil, "y"), ("n", nil, "n"),
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+            ForEach(Self.keys, id: \.label) { k in
+                Button {
+                    if let keys = k.keys { core.keys(sessionId, keys) }
+                    if let text = k.text { core.input(sessionId, text) }
+                } label: {
+                    Text(k.label).font(.body.weight(.medium)).foregroundStyle(Tok.text)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(Tok.surface, in: RoundedRectangle(cornerRadius: 10))
+                }
+                .accessibilityLabel(k.keys?.first ?? k.label)
+            }
+        }
     }
 }
