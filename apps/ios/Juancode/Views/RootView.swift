@@ -29,15 +29,12 @@ struct RootView: View {
     /// Hidden while typing (juancode-3aq8.10), unless the Keys popover was opened on purpose.
     private var dockShown: Bool { !keyboardUp || popover == .keys }
 
-    /// Room the terminal leaves for the dock, so it never covers text. Along the dock's short side:
-    /// the collapsed chevron costs a few rows at the bottom rather than ~10 of ~58 columns, and the
-    /// open dock (a tall column) a side gutter rather than half the rows. Reflows the pty on toggle.
-    /// shortcut: assumes the dock sits at a screen edge; dragged mid-screen it still covers some text.
+    /// Room the terminal leaves for the dock. Width is never given up: the open dock floats over the
+    /// right-hand columns (the user prefers full-width rows); only the collapsed chevron, parked at
+    /// the bottom, costs a few rows. Reflows the pty on toggle.
     private var terminalInset: EdgeInsets {
-        guard dockShown else { return EdgeInsets() }
-        if dockCollapsed, dockY > -40 { return EdgeInsets(top: 0, leading: 0, bottom: 60, trailing: 0) }
-        return flipped ? EdgeInsets(top: 0, leading: 66, bottom: 0, trailing: 0)
-                       : EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 66)
+        guard dockShown, dockCollapsed, dockY > -40 else { return EdgeInsets() }
+        return EdgeInsets(top: 0, leading: 0, bottom: 60, trailing: 0)
     }
 
     private var statusColor: Color {
@@ -64,6 +61,11 @@ struct RootView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
                         Text(core.connected ? "Connected" : core.lastError ?? "Disconnected")
+                        if dockX != 0 || dockY != 0 {
+                            Button("Reset actions position", systemImage: "arrow.down.right.and.arrow.up.left") {
+                                withAnimation(.snappy) { dockX = 0; dockY = 0 }
+                            }
+                        }
                         Button("Unpair", role: .destructive, action: unpair)
                     } label: {
                         // Connection, then the open session's activity, as one line.
@@ -71,6 +73,7 @@ struct RootView: View {
                     }
                     .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
                 }
+                .hidingSharedBackground()
             }
         }
         .overlay {
@@ -311,5 +314,12 @@ private extension View {
             .opacity(shown ? 1 : 0)
             .animation(.spring(response: 0.38, dampingFraction: 0.82)
                 .delay(shown ? Double(order) * 0.03 : Double(max(0, 5 - order)) * 0.02), value: shown)
+    }
+}
+
+private extension ToolbarContent {
+    /// Just the status line, without the iOS 26 glass circle around toolbar items.
+    @ToolbarContentBuilder func hidingSharedBackground() -> some ToolbarContent {
+        if #available(iOS 26, *) { sharedBackgroundVisibility(.hidden) } else { self }
     }
 }

@@ -19,6 +19,7 @@ struct SessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            contextBar
             TerminalPane(core: core, sessionId: sessionId)
                 .padding(terminalInset)
                 // One reflow at the final size, not a pty resize per frame of the dock's spring.
@@ -47,19 +48,11 @@ struct SessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
+                // Only the status line and "…" share the bar, so the title gets the width for two lines.
                 Text(core.sessions.first { $0.id == sessionId }?.title ?? "")
-                    .font(.footnote.weight(.semibold)).foregroundStyle(Tok.text)
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(Tok.text)
                     .lineLimit(2).multilineTextAlignment(.center)
-            }
-            if let session = core.sessions.first(where: { $0.id == sessionId }), session.kind == .agent {
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 8) {
-                        if let chain = core.chains.chain(forSession: session.id) {
-                            ChainChip(name: chain.name, role: nil).frame(maxWidth: 96)
-                        }
-                        ContextMeter(percent: session.usage?.contextPercent)
-                    }
-                }
+                    .frame(maxWidth: .infinity)
             }
             ToolbarItem(placement: .topBarTrailing) { sessionMenu }
         }
@@ -104,12 +97,33 @@ struct SessionView: View {
         .accessibilityLabel(transcribing ? "Transcribing" : "Stop recording")
     }
 
+    /// The context meter as a hairline under the title: full width, so it costs no header room.
+    @ViewBuilder private var contextBar: some View {
+        if let session = core.sessions.first(where: { $0.id == sessionId }), session.kind == .agent {
+            let percent = session.usage?.contextPercent
+            GeometryReader { g in
+                Rectangle().fill(Tok.context(percent ?? 0))
+                    .frame(width: g.size.width * CGFloat(min(percent ?? 0, 100)) / 100)
+            }
+            .frame(height: 2)
+            .background(Tok.surface2)
+            .accessibilityLabel(percent.map { "Context \($0) percent" } ?? "Context unknown")
+        }
+    }
+
     /// "…": session actions, plus the per-session push toggle and its ntfy topic.
     private var sessionMenu: some View {
         let session = core.sessions.first { $0.id == sessionId }
         let running = session?.status == .running
         let on = !(alerts?.muted.contains(sessionId) ?? false)
         return Menu {
+            if let session, session.kind == .agent {
+                let chain = core.chains.chain(forSession: session.id)
+                Section {
+                    Text(session.usage?.contextPercent.map { "Context \($0)%" } ?? "Context unknown")
+                    if let chain { Text("Chain: \(chain.name)") }
+                }
+            }
             if let session {
                 if running {
                     Button { core.respawn("restartFresh", sessionId) } label: {
