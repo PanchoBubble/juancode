@@ -2,11 +2,13 @@ import JuancodeWire
 import SwiftUI
 
 /// Drawer (projects → sessions) on the left, the selected session in the middle.
-/// A right panel (Oracle, PRs) slots in as a third column later.
+/// The right panel (Oracle chat, PRs) is an inspector; the bell lists sessions waiting for input.
 struct RootView: View {
     let core: RemoteCore
     @Binding var selected: String?
     let unpair: () -> Void
+    @State private var panel = false
+    @State private var chat = OracleChat()
 
     var body: some View {
         NavigationSplitView {
@@ -18,6 +20,16 @@ struct RootView: View {
                 ContentUnavailableView("No session", systemImage: "terminal",
                                        description: Text(core.lastError ?? "Pick one from the drawer."))
             }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { BellButton(core: core) { selected = $0 } }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { panel.toggle() } label: { Image(systemName: "sidebar.trailing") }
+                    .accessibilityLabel("Oracle and PRs")
+            }
+        }
+        .inspector(isPresented: $panel) {
+            RightPanel(core: core, chat: chat) { selected = $0; panel = false }
         }
         .task { core.start() }
     }

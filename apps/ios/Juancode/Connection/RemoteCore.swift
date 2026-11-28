@@ -9,6 +9,7 @@ final class RemoteCore {
     let pairing: Pairing
     private(set) var sessions: [SessionMeta] = []
     private(set) var activity: [String: SessionActivity] = [:]
+    private(set) var trackedPrs: [TrackedPrInfo] = []
     private(set) var connected = false
     private(set) var lastError: String?
 
@@ -99,6 +100,7 @@ final class RemoteCore {
         lastError = up ? nil : reason
         guard up else { return }
         Task { await refreshSessions() }
+        send(["type": "subscribeTrackedPrs"])
         if let a = attachedTo { attach(a.id, cols: a.cols, rows: a.rows) }
     }
 
@@ -110,6 +112,7 @@ final class RemoteCore {
             var data: String?
             var scrollback: String?
             var message: String?
+            var tracked: [TrackedPrInfo]?
         }
         guard let f = try? JSONDecoder().decode(Frame.self, from: data) else { return }
         switch type {
@@ -126,6 +129,8 @@ final class RemoteCore {
             if let id = f.sessionId, let i = sessions.firstIndex(where: { $0.id == id }) {
                 sessions[i].status = .exited
             }
+        case "trackedPrs":
+            trackedPrs = f.tracked ?? []
         case "error":
             lastError = f.message
         default:

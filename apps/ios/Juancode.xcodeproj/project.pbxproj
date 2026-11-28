@@ -13,17 +13,21 @@
 		552BF8DFC741870A061C1082 /* RemoteCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CBDC4681FB85249DC2F9D9A /* RemoteCore.swift */; };
 		562E64CB89794C0684BDED5C /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = DD356DF494E488527EF15A8D /* SwiftTerm */; };
 		5CE59C7CA585115F5F7A3FA2 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE44E79099AF699D8DAA437C /* PairingView.swift */; };
+		77211B42B1DB9A76E916885E /* RightPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A0F442EE2BA01142291359 /* RightPanel.swift */; };
 		7C80144A7AC6FDA659F6AB68 /* SessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0DED9560EA80F9B4A82373 /* SessionView.swift */; };
+		7F7F795BAB2EA5724501C99D /* SidecarClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E4DF04A2793D0710AA46497 /* SidecarClient.swift */; };
 		82DECEBBE5DB8DC058B75A31 /* JuancodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4125BC3339EDF426B3F83D27 /* JuancodeApp.swift */; };
 		B0FE16AE027BBACA642ADEC4 /* JuancodeWire in Frameworks */ = {isa = PBXBuildFile; productRef = 72C1E44699346B52934B8944 /* JuancodeWire */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		06A0F442EE2BA01142291359 /* RightPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanel.swift; sourceTree = "<group>"; };
 		32FA03DECE35E3D7BBD33BFA /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		4125BC3339EDF426B3F83D27 /* JuancodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuancodeApp.swift; sourceTree = "<group>"; };
 		5C250597C60ECD2B6EBFDF03 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		5DC91491B0031E2A97D759E2 /* Projects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Projects.swift; sourceTree = "<group>"; };
 		6CBDC4681FB85249DC2F9D9A /* RemoteCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCore.swift; sourceTree = "<group>"; };
+		6E4DF04A2793D0710AA46497 /* SidecarClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidecarClient.swift; sourceTree = "<group>"; };
 		8D8390040665C9B817270647 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		963542575E530B1992532A39 /* native */ = {isa = PBXFileReference; lastKnownFileType = folder; name = native; path = ../native; sourceTree = SOURCE_ROOT; };
 		9BD0D53211A3407023A4D69E /* Juancode.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Juancode.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -68,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				EE44E79099AF699D8DAA437C /* PairingView.swift */,
+				06A0F442EE2BA01142291359 /* RightPanel.swift */,
 				5C250597C60ECD2B6EBFDF03 /* RootView.swift */,
 				EA0DED9560EA80F9B4A82373 /* SessionView.swift */,
 			);
@@ -96,6 +101,7 @@
 			children = (
 				32FA03DECE35E3D7BBD33BFA /* Pairing.swift */,
 				6CBDC4681FB85249DC2F9D9A /* RemoteCore.swift */,
+				6E4DF04A2793D0710AA46497 /* SidecarClient.swift */,
 			);
 			path = Connection;
 			sourceTree = "<group>";
@@ -178,8 +184,10 @@
 				5CE59C7CA585115F5F7A3FA2 /* PairingView.swift in Sources */,
 				30D13F1287AC392E77DB6C58 /* Projects.swift in Sources */,
 				552BF8DFC741870A061C1082 /* RemoteCore.swift in Sources */,
+				77211B42B1DB9A76E916885E /* RightPanel.swift in Sources */,
 				4AD77E9445F3F6C07C02C7EE /* RootView.swift in Sources */,
 				7C80144A7AC6FDA659F6AB68 /* SessionView.swift in Sources */,
+				7F7F795BAB2EA5724501C99D /* SidecarClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
