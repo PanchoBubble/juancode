@@ -41,7 +41,8 @@ struct RootView: View {
         NavigationStack {
             Group {
                 if let id = selected {
-                    SessionView(core: core, sessionId: id, terminalInset: terminalInset, unpair: unpair).id(id)
+                    SessionView(core: core, sessionId: id, terminalInset: terminalInset, unpair: unpair,
+                                openChains: { popover = nil; panel = .chains }, compact: keyboardUp).id(id)
                 } else {
                     ContentUnavailableView("No session", systemImage: "terminal",
                                            description: Text(core.lastError ?? "Tap ⌃ for actions, then ☰ or ⚡︎."))

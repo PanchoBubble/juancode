@@ -30,7 +30,7 @@ extension Color {
 
 extension SessionMeta {
     var displayTitle: String { title.isEmpty ? provider.rawValue : title }
-    var projectName: String { (cwd as NSString).lastPathComponent }
+    var projectName: String { (projectPath as NSString).lastPathComponent }
 }
 
 extension RemoteCore {

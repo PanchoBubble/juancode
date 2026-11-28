@@ -8,21 +8,26 @@ struct ChainsView: View {
     @AppStorage("chainSort") private var byCreation = false
 
     /// Newest first, by creation or by the latest update of a member session (or creation, if none).
-    private func sorted(_ roots: [Chain]) -> [Chain] {
+    /// Keys are computed once per chain against `byId`: with ~2k sessions, scanning them per
+    /// comparison is what made the sheet slow to open.
+    private func sorted(_ roots: [Chain], _ byId: [String: SessionMeta]) -> [Chain] {
         func key(_ c: Chain) -> Int {
             if byCreation { return c.createdAt }
-            let ids = Set(c.members.filter { $0.kind == .session }.map(\.ref))
-            return core.sessions.filter { ids.contains($0.id) }.map(\.updatedAt).max() ?? c.createdAt
+            return c.members.compactMap { $0.kind == .session ? byId[$0.ref]?.updatedAt : nil }.max() ?? c.createdAt
         }
-        return roots.sorted { key($0) > key($1) }
+        return roots.map { ($0, key($0)) }.sorted { $0.1 > $1.1 }.map(\.0)
     }
 
     var body: some View {
+        let byId = Dictionary(core.sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let slugs = Set(core.chains.chains.map(\.slug))
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    section("ACTIVE", core.chains.outline(sorted(core.chains.activeRoots)))
-                    section("CLOSED", core.chains.outline(sorted(core.chains.chains.filter { !$0.isActive && !core.chains.isNested($0) })))
+                    section("ACTIVE", core.chains.outline(sorted(core.chains.activeRoots, byId)), byId)
+                    section("CLOSED", core.chains.outline(sorted(core.chains.chains.filter {
+                        !$0.isActive && !($0.parent.map(slugs.contains) ?? false)
+                    }, byId)), byId)
                     if core.chains.isEmpty {
                         ContentUnavailableView("No chains", systemImage: "link")
                     }
@@ -47,12 +52,16 @@ struct ChainsView: View {
         }
     }
 
-    @ViewBuilder private func section(_ title: String, _ rows: [(chain: Chain, depth: Int)]) -> some View {
+    @ViewBuilder private func section(_ title: String, _ rows: [(chain: Chain, depth: Int)],
+                                      _ byId: [String: SessionMeta]) -> some View {
         if !rows.isEmpty {
             Text(title).font(.caption).foregroundStyle(Tok.secondary).padding(.top, 8)
             ForEach(rows, id: \.chain.slug) { row in
-                NavigationLink(value: row.chain.slug) { ChainListRow(core: core, chain: row.chain) }
-                    .buttonStyle(.plain)
+                NavigationLink(value: row.chain.slug) {
+                    ChainListRow(core: core, chain: row.chain,
+                                 sessions: row.chain.members.compactMap { $0.kind == .session ? byId[$0.ref] : nil })
+                }
+                .buttonStyle(.plain)
                     .padding(.leading, CGFloat(row.depth) * 16)
             }
         }
@@ -62,9 +71,13 @@ struct ChainsView: View {
 struct ChainListRow: View {
     let core: RemoteCore
     let chain: Chain
+    /// Resolved by the caller from a shared lookup; callers showing a few rows may leave it nil.
+    var sessions: [SessionMeta]?
 
     var body: some View {
-        let sessions = chain.members.filter { $0.kind == .session }.compactMap { m in core.sessions.first { $0.id == m.ref } }
+        let sessions = sessions ?? chain.members.compactMap { m in
+            m.kind == .session ? core.sessions.first { $0.id == m.ref } : nil
+        }
         let waiting = sessions.filter(core.isWaiting).count
         HStack(spacing: 12) {
             Image(systemName: "link").foregroundStyle(Tok.chain)

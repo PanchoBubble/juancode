@@ -1,3 +1,4 @@
+import JuancodeWire
 import SwiftTerm
 import AVFoundation
 import SwiftUI
@@ -10,6 +11,9 @@ struct SessionView: View {
     /// Room left for the dock (`RootView.terminalInset`), so it never covers terminal text.
     var terminalInset = EdgeInsets()
     var unpair: () -> Void = {}
+    var openChains: () -> Void = {}
+    /// Keyboard up: the header drops to one line.
+    var compact = false
     @State private var line = ""
     @State private var alerts: AlertsState?
     @State private var recorder = VoiceRecorder()
@@ -90,17 +94,69 @@ struct SessionView: View {
         .accessibilityLabel(transcribing ? "Transcribing" : "Stop recording")
     }
 
-    /// Status line hugging the left edge, the title left-aligned over two lines, "…" on the right.
-    private var header: some View {
+    /// Status line hugging the left edge, the title left-aligned over two lines, "…" on the right,
+    /// and a details line (project · worktree, chain, model and context, PR, state). While typing it
+    /// shrinks to a one-line title: the terminal needs those rows more.
+    @ViewBuilder private var header: some View {
+        let session = core.sessions.first { $0.id == sessionId }
         HStack(spacing: 6) {
             StatusLine(core: core, sessionId: sessionId, unpair: unpair)
-            Text(core.sessions.first { $0.id == sessionId }?.title ?? "")
-                .font(.subheadline.weight(.semibold)).foregroundStyle(Tok.text)
-                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(session?.displayTitle ?? "")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(Tok.text)
+                    .lineLimit(compact ? 1 : 2)
+                if !compact, let session { details(session) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if session?.skipPermissions == true {
+                Image(systemName: "bolt.shield").font(.caption).foregroundStyle(Tok.waiting)
+                    .accessibilityLabel("Accepting all permissions")
+            }
             sessionMenu.font(.title3).frame(width: 44, height: 44)
         }
-        .padding(.trailing, 6)
+        .padding(.trailing, 6).padding(.vertical, compact ? 0 : 4)
         .frame(minHeight: 44)
+        .background(session.map(core.isWaiting) == true ? Tok.waitingBg : .clear)
+    }
+
+    private func details(_ s: SessionMeta) -> some View {
+        let chain = core.chains.chain(forSession: s.id)
+        let role = chain?.members.first { $0.kind == .session && $0.ref == s.id }?.role
+        let pr = core.trackedPrs.first { $0.sessionId == s.id }
+        let model = (s.usage?.model ?? s.pinnedModel).map { $0.replacingOccurrences(of: "claude-", with: "") }
+        let slot = s.effectiveCwd == s.projectPath ? nil : (s.effectiveCwd as NSString).lastPathComponent
+        let place = [s.projectName, slot].compactMap { $0 }
+        let state = s.status == .exited ? "Exited" : s.dormant ? "Sleeping" : nil
+        return HStack(spacing: 6) {
+            Text(place.joined(separator: " · ")).lineLimit(1).layoutPriority(1)
+            if let chain {
+                Button(action: openChains) { ChainChip(name: chain.name, role: role) }.buttonStyle(.plain)
+            }
+            if let model { Text(model).lineLimit(1) }
+            if let p = s.usage?.contextPercent {
+                Text("\(p)%").monospacedDigit().foregroundStyle(p >= 60 ? Tok.context(p) : Tok.secondary)
+            }
+            if let pr, let url = URL(string: pr.url) {
+                Link(destination: url) {
+                    HStack(spacing: 3) {
+                        Text("#\(pr.number)")
+                        Circle().fill(prColor(pr)).frame(width: 6, height: 6)
+                    }
+                }
+            }
+            if let state { Text(state).foregroundStyle(Tok.text) }
+        }
+        .font(.caption).foregroundStyle(Tok.secondary)
+    }
+
+    private func prColor(_ pr: TrackedPrInfo) -> SwiftUI.Color {
+        if pr.state == "needs_decision" { return Tok.waiting }
+        switch pr.checks {
+        case "passing": return .green
+        case "failing": return .red
+        case "pending": return Tok.blue
+        default: return Tok.secondary
+        }
     }
 
     /// The context meter as a hairline under the title: full width, so it costs no header room.
@@ -123,13 +179,6 @@ struct SessionView: View {
         let running = session?.status == .running
         let on = !(alerts?.muted.contains(sessionId) ?? false)
         return Menu {
-            if let session, session.kind == .agent {
-                let chain = core.chains.chain(forSession: session.id)
-                Section {
-                    Text(session.usage?.contextPercent.map { "Context \($0)%" } ?? "Context unknown")
-                    if let chain { Text("Chain: \(chain.name)") }
-                }
-            }
             if let session {
                 if running {
                     Button { core.respawn("restartFresh", sessionId) } label: {
@@ -156,15 +205,16 @@ struct SessionView: View {
                     Label(on ? "Mute phone alerts" : "Unmute phone alerts", systemImage: on ? "bell.slash" : "bell")
                 }
             }
+            if running {
+                Button(role: .destructive) { confirmStop = true } label: { Label("Stop session", systemImage: "stop.fill") }
+            }
+            Divider()
             Button { UIPasteboard.general.string = sessionId } label: { Label("Copy session id", systemImage: "doc.on.doc") }
             if let topic = alerts?.topic {
                 Section("ntfy topic") {
                     Button(topic) { UIPasteboard.general.string = topic }
                     if let url = URL(string: "ntfy://ntfy.sh/\(topic)") { Link("Open in ntfy", destination: url) }
                 }
-            }
-            if running {
-                Button(role: .destructive) { confirmStop = true } label: { Label("Stop session", systemImage: "stop.fill") }
             }
         } label: {
             Image(systemName: "ellipsis.circle").accessibilityLabel("Session actions")
