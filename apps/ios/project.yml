@@ -27,6 +27,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: WC72R44Z87
     info:
       path: Juancode/Info.plist
       properties:
