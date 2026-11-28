@@ -10,6 +10,7 @@ final class RemoteCore {
     private(set) var sessions: [SessionMeta] = []
     private(set) var activity: [String: SessionActivity] = [:]
     private(set) var trackedPrs: [TrackedPrInfo] = []
+    private(set) var chains = ChainBook()
     private(set) var connected = false
     private(set) var lastError: String?
 
@@ -114,6 +115,7 @@ final class RemoteCore {
         guard up else { return }
         Task { await refreshSessions() }
         send(["type": "subscribeTrackedPrs"])
+        send(["type": "subscribeChains"])
         if let a = attachedTo { attach(a.id, cols: a.cols, rows: a.rows) }
     }
 
@@ -126,6 +128,9 @@ final class RemoteCore {
             var scrollback: String?
             var message: String?
             var tracked: [TrackedPrInfo]?
+            var chains: [Chain]?
+            var chain: Chain?
+            var slug: String?
         }
         guard let f = try? JSONDecoder().decode(Frame.self, from: data) else { return }
         switch type {
@@ -147,6 +152,12 @@ final class RemoteCore {
             }
         case "trackedPrs":
             trackedPrs = f.tracked ?? []
+        case "chains":
+            chains.replace(with: f.chains ?? [])
+        case "chain":
+            if let c = f.chain { chains.upsert(c) }
+        case "chainRemoved":
+            if let slug = f.slug { chains.remove(slug: slug) }
         case "error":
             lastError = f.message
             awaitingCreate = false

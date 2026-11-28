@@ -1,7 +1,7 @@
 import Foundation
 import JuancodeWire
 
-/// The drawer's shape: agent sessions grouped by the project they were started in.
+/// Projects list shape: agent sessions grouped by the project they were started in.
 struct ProjectGroup: Identifiable {
     var id: String { path }
     var path: String

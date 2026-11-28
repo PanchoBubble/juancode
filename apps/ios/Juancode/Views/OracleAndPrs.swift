@@ -11,7 +11,7 @@ struct TrackedPrInfo: Decodable, Identifiable, Equatable {
     var checks: String  // passing | failing | pending | none
 }
 
-/// Oracle chat state; lives in RootView so closing the panel keeps the thread.
+/// Oracle chat state; lives in RootView so closing the sheet keeps the thread.
 @MainActor @Observable
 final class OracleChat {
     struct Message: Identifiable {
@@ -43,28 +43,6 @@ final class OracleChat {
             messages.append(.init(mine: false, text: error.localizedDescription, failed: true))
         }
         if messages[messages.count - 1].text.isEmpty { messages[messages.count - 1].text = "(no reply)" }
-    }
-}
-
-/// Right panel: Oracle chat and tracked PRs.
-struct RightPanel: View {
-    let core: RemoteCore
-    let chat: OracleChat
-    let open: (String) -> Void
-    @State private var tab = Tab.oracle
-    enum Tab: String, CaseIterable { case oracle = "Oracle", prs = "PRs" }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("Panel", selection: $tab) {
-                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue) }
-            }
-            .pickerStyle(.segmented).padding()
-            switch tab {
-            case .oracle: OracleChatView(core: core, chat: chat)
-            case .prs: PrListView(core: core, open: open)
-            }
-        }
     }
 }
 
@@ -143,36 +121,4 @@ struct PrListView: View {
             }
         }
     }
-}
-
-/// Bell: only sessions waiting for input; tapping one opens it.
-struct BellButton: View {
-    let core: RemoteCore
-    let open: (String) -> Void
-    @State private var shown = false
-
-    private var waiting: [SessionMetaRow] {
-        core.sessions.filter { $0.status != .exited && core.activity[$0.id] == .waitingInput }
-            .map { SessionMetaRow(id: $0.id, title: $0.title.isEmpty ? $0.provider.rawValue : $0.title) }
-    }
-
-    var body: some View {
-        Button { shown = true } label: {
-            Image(systemName: waiting.isEmpty ? "bell" : "bell.badge.fill")
-        }
-        .accessibilityLabel("\(waiting.count) waiting for input")
-        .popover(isPresented: $shown) {
-            VStack(alignment: .leading, spacing: 0) {
-                if waiting.isEmpty { Text("Nothing needs input").foregroundStyle(.secondary).padding() }
-                ForEach(waiting) { s in
-                    Button { shown = false; open(s.id) } label: {
-                        Text(s.title).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).padding()
-                    }
-                }
-            }
-            .frame(minWidth: 240).presentationCompactAdaptation(.popover)
-        }
-    }
-
-    struct SessionMetaRow: Identifiable { let id: String; let title: String }
 }

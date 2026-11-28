@@ -1,97 +1,175 @@
 import JuancodeWire
 import SwiftUI
 
-/// Drawer (projects → sessions) on the left, the selected session in the middle.
-/// The right panel (Oracle chat, PRs) is an inspector; the bell lists sessions waiting for input.
+/// The selected session full-screen, with the action dock floating bottom-right
+/// (juancode-3aq8.10). + and Active open as popovers that spring from their button;
+/// projects, search and chains slide up as sheets.
 struct RootView: View {
     let core: RemoteCore
     @Binding var selected: String?
     let unpair: () -> Void
-    @State private var panel = false
-    @State private var newSession = false
+    @State private var panel: Panel?
+    @State private var popover: Popover?
+    @State private var oracle = false
+    @State private var keyboardUp = false
     @State private var chat = OracleChat()
 
-    var body: some View {
-        NavigationSplitView {
-            DrawerView(core: core, selected: $selected, unpair: unpair)
-        } detail: {
-            if let id = selected {
-                SessionView(core: core, sessionId: id).id(id)
-            } else {
-                ContentUnavailableView("No session", systemImage: "terminal",
-                                       description: Text(core.lastError ?? "Pick one from the drawer."))
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { newSession = true } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("New session")
-            }
-            ToolbarItem(placement: .topBarTrailing) { BellButton(core: core) { selected = $0 } }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { panel.toggle() } label: { Image(systemName: "sidebar.trailing") }
-                    .accessibilityLabel("Oracle and PRs")
-            }
-        }
-        .inspector(isPresented: $panel) {
-            RightPanel(core: core, chat: chat) { selected = $0; panel = false }
-        }
-        .sheet(isPresented: $newSession) { NewSessionSheet(core: core) { selected = $0 } }
-        .task { core.start() }
-    }
-}
+    enum Panel: String, Identifiable { case projects, search, chains; var id: String { rawValue } }
+    enum Popover { case new, active }
 
-struct DrawerView: View {
-    let core: RemoteCore
-    @Binding var selected: String?
-    let unpair: () -> Void
+    private var current: SessionMeta? { core.sessions.first { $0.id == selected } }
 
     var body: some View {
-        List(selection: $selected) {
-            ForEach(ProjectGroup.group(core.sessions)) { project in
-                Section(project.name) {
-                    ForEach(project.sessions, id: \.id) { s in
-                        HStack {
-                            StatusDot(state: s.status == .exited ? nil : core.activity[s.id])
-                            VStack(alignment: .leading) {
-                                Text(s.title.isEmpty ? s.provider.rawValue : s.title).lineLimit(1)
-                                Text(s.provider.rawValue).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .tag(s.id)
+        NavigationStack {
+            Group {
+                if let id = selected {
+                    SessionView(core: core, sessionId: id).id(id)
+                } else {
+                    ContentUnavailableView("No session", systemImage: "terminal",
+                                           description: Text(core.lastError ?? "Pick one from ☰ or ⚡︎."))
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Text(core.connected ? "Connected" : core.lastError ?? "Disconnected")
+                        Button("Unpair", role: .destructive, action: unpair)
+                    } label: {
+                        Circle().fill(core.connected ? .green : .red).frame(width: 8, height: 8)
                     }
+                    .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
                 }
             }
         }
-        .refreshable { await core.refreshSessions() }
-        .navigationTitle("juancode")
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Circle().fill(core.connected ? .green : .red).frame(width: 8, height: 8)
-                    .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu { Button("Unpair", role: .destructive, action: unpair) } label: { Image(systemName: "ellipsis.circle") }
+        .overlay {
+            if popover != nil {
+                Color.black.opacity(0.4).ignoresSafeArea()
+                    .onTapGesture { withAnimation(.spring(duration: 0.3)) { popover = nil } }
+                    .transition(.opacity)
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if !keyboardUp {
+                HStack(alignment: .bottom, spacing: 10) {
+                    if let popover { popoverCard(popover) }
+                    ActionDock(core: core, popover: popover) { tap($0) }
+                }
+                .padding(.trailing, 12)
+                .padding(.bottom, 96) // clear the key row and input bar
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .sheet(item: $panel) { p in
+            Group {
+                switch p {
+                case .projects: ProjectsView(core: core, open: open)
+                case .search: SearchView(core: core, open: open)
+                case .chains: ChainsView(core: core, open: open)
+                }
+            }
+            .preferredColorScheme(.dark)
+        }
+        .sheet(isPresented: $oracle) {
+            NavigationStack {
+                OracleChatView(core: core, chat: chat)
+                    .navigationTitle("Oracle").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { Button("Done") { oracle = false } }
+            }
+            .preferredColorScheme(.dark)
+        }
+        .preferredColorScheme(.dark)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            withAnimation(.snappy) { keyboardUp = true; popover = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.snappy) { keyboardUp = false }
+        }
+        .task { core.start() }
+    }
+
+    private func tap(_ item: ActionDock.Item) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            switch item {
+            case .new: popover = popover == .new ? nil : .new
+            case .active: popover = popover == .active ? nil : .active
+            case .projects: popover = nil; panel = .projects
+            case .search: popover = nil; panel = .search
+            case .chains: popover = nil; panel = .chains
+            }
+        }
+    }
+
+    private func open(_ id: String) {
+        withAnimation(.spring(duration: 0.3)) { popover = nil }
+        panel = nil
+        selected = id
+    }
+
+    @ViewBuilder private func popoverCard(_ p: Popover) -> some View {
+        Group {
+            switch p {
+            case .new:
+                NewSessionCard(core: core, cwd: current?.cwd ?? ProjectGroup.group(core.sessions).first?.path,
+                               open: open, openOracle: { popover = nil; oracle = true })
+            case .active:
+                ActiveList(core: core, open: open)
+            }
+        }
+        .padding(14)
+        .frame(width: 290)
+        .background(Tok.bg2, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Tok.surface2))
+        // Springs out of the dock: scale+opacity anchored at the dock's corner.
+        .transition(.scale(scale: 0.2, anchor: .bottomTrailing).combined(with: .opacity))
     }
 }
 
-struct StatusDot: View {
-    /// nil = exited or not yet reported.
-    let state: SessionActivity?
+/// Vertical pill: chains, search, active (badge = waiting for input), projects, then +.
+struct ActionDock: View {
+    let core: RemoteCore
+    let popover: RootView.Popover?
+    let tap: (Item) -> Void
+
+    enum Item { case chains, search, active, projects, new }
 
     var body: some View {
-        Circle().fill(color).frame(width: 10, height: 10)
-            .accessibilityLabel(state.map { "\($0.rawValue)" } ?? "unknown")
+        let waiting = core.sessions.filter(core.isWaiting).count
+        VStack(spacing: 10) {
+            VStack(spacing: 4) {
+                button(.chains, "link", "Chains")
+                button(.search, "magnifyingglass", "Search")
+                button(.active, "bolt.fill", "Active sessions, \(waiting) waiting for input", selected: popover == .active)
+                    .overlay(alignment: .topTrailing) {
+                        if waiting > 0 {
+                            Text("\(waiting)").font(.caption2.bold()).foregroundStyle(.black)
+                                .padding(.horizontal, 5).background(Tok.waiting, in: Capsule())
+                                .offset(x: 4, y: -2)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    .animation(.spring, value: waiting)
+                button(.projects, "line.3.horizontal", "Projects")
+            }
+            .padding(4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Tok.surface2))
+            Button { tap(.new) } label: {
+                Image(systemName: "plus").font(.title2.weight(.semibold)).foregroundStyle(.white)
+                    .rotationEffect(.degrees(popover == .new ? 45 : 0))
+                    .frame(width: 52, height: 52)
+                    .background(popover == .new ? Tok.surface2 : Tok.blue, in: Circle())
+                    .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+            }
+            .accessibilityLabel(popover == .new ? "Close" : "New session")
+        }
     }
 
-    private var color: Color {
-        switch state {
-        case .busy: .blue
-        case .waitingInput: .orange
-        case .idle: .green
-        case nil: .gray
+    private func button(_ item: Item, _ icon: String, _ label: String, selected: Bool = false) -> some View {
+        Button { tap(item) } label: {
+            Image(systemName: icon).font(.system(size: 17)).foregroundStyle(selected ? Tok.blue : Tok.text)
+                .frame(width: 40, height: 40)
+                .background(selected ? Tok.surface2 : .clear, in: Circle())
         }
+        .accessibilityLabel(label)
     }
 }
