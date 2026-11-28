@@ -18,10 +18,12 @@
 		7F7F795BAB2EA5724501C99D /* SidecarClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E4DF04A2793D0710AA46497 /* SidecarClient.swift */; };
 		82DECEBBE5DB8DC058B75A31 /* JuancodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4125BC3339EDF426B3F83D27 /* JuancodeApp.swift */; };
 		B0FE16AE027BBACA642ADEC4 /* JuancodeWire in Frameworks */ = {isa = PBXBuildFile; productRef = 72C1E44699346B52934B8944 /* JuancodeWire */; };
+		C46612E6514AA54E18F8CBD4 /* NewSessionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 255ADACA143D9CFD45515510 /* NewSessionSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		06A0F442EE2BA01142291359 /* RightPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanel.swift; sourceTree = "<group>"; };
+		255ADACA143D9CFD45515510 /* NewSessionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionSheet.swift; sourceTree = "<group>"; };
 		32FA03DECE35E3D7BBD33BFA /* Pairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
 		4125BC3339EDF426B3F83D27 /* JuancodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuancodeApp.swift; sourceTree = "<group>"; };
 		5C250597C60ECD2B6EBFDF03 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -71,6 +73,7 @@
 		5955EB48A321E1A1152EFA57 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				255ADACA143D9CFD45515510 /* NewSessionSheet.swift */,
 				EE44E79099AF699D8DAA437C /* PairingView.swift */,
 				06A0F442EE2BA01142291359 /* RightPanel.swift */,
 				5C250597C60ECD2B6EBFDF03 /* RootView.swift */,
@@ -180,6 +183,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				82DECEBBE5DB8DC058B75A31 /* JuancodeApp.swift in Sources */,
+				C46612E6514AA54E18F8CBD4 /* NewSessionSheet.swift in Sources */,
 				0F24BB5868DC780FCAC47BFC /* Pairing.swift in Sources */,
 				5CE59C7CA585115F5F7A3FA2 /* PairingView.swift in Sources */,
 				30D13F1287AC392E77DB6C58 /* Projects.swift in Sources */,

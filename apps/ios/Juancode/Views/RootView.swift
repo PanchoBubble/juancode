@@ -8,6 +8,7 @@ struct RootView: View {
     @Binding var selected: String?
     let unpair: () -> Void
     @State private var panel = false
+    @State private var newSession = false
     @State private var chat = OracleChat()
 
     var body: some View {
@@ -22,6 +23,10 @@ struct RootView: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { newSession = true } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("New session")
+            }
             ToolbarItem(placement: .topBarTrailing) { BellButton(core: core) { selected = $0 } }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { panel.toggle() } label: { Image(systemName: "sidebar.trailing") }
@@ -31,6 +36,7 @@ struct RootView: View {
         .inspector(isPresented: $panel) {
             RightPanel(core: core, chat: chat) { selected = $0; panel = false }
         }
+        .sheet(isPresented: $newSession) { NewSessionSheet(core: core) { selected = $0 } }
         .task { core.start() }
     }
 }

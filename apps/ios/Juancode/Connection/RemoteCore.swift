@@ -15,6 +15,9 @@ final class RemoteCore {
 
     /// Terminal bytes for the attached session: `attached` scrollback, then `output`.
     @ObservationIgnored var onTerminalBytes: ((String, [UInt8]) -> Void)?
+    /// Called with the id of the session a `create` from this phone produced.
+    @ObservationIgnored var onCreated: ((String) -> Void)?
+    @ObservationIgnored private var awaitingCreate = false
     @ObservationIgnored private var wire: WireConnection?
     /// Re-sent after a reconnect, so the open terminal picks up where it left off.
     @ObservationIgnored private var attachedTo: (id: String, cols: Int, rows: Int)?
@@ -91,6 +94,16 @@ final class RemoteCore {
         send(["type": "key", "sessionId": id, "keys": names])
     }
 
+    /// New agent session. `dispatchId` carries a `phone-` prefix: the core echoes it on every
+    /// `activity` frame, which is how the sidecar tells a phone-started session (juancode-3aq8.7).
+    func create(provider: ProviderId, cwd: String, model: String?, worktree: Bool) {
+        awaitingCreate = true
+        var body: [String: Any] = ["type": "create", "provider": provider.rawValue, "cwd": cwd,
+                                   "isolateWorktree": worktree, "dispatchId": "phone-\(UUID().uuidString)"]
+        if let model, !model.isEmpty { body["model"] = model }
+        send(body)
+    }
+
     private func send(_ body: [String: Any]) { wire?.send(body) }
 
     // MARK: Server frames
@@ -119,7 +132,10 @@ final class RemoteCore {
         case "activity":
             if let id = f.sessionId, let state = f.state { activity[id] = state }
         case "created", "sessionMeta", "attached":
-            if let meta = f.session { upsert(meta) }
+            if let meta = f.session {
+                upsert(meta)
+                if type == "created", awaitingCreate { awaitingCreate = false; onCreated?(meta.id) }
+            }
             if type == "attached", let id = f.sessionId, let bytes = f.scrollback {
                 onTerminalBytes?(id, Array(bytes.utf8))
             }
@@ -133,6 +149,7 @@ final class RemoteCore {
             trackedPrs = f.tracked ?? []
         case "error":
             lastError = f.message
+            awaitingCreate = false
         default:
             break
         }
