@@ -37,44 +37,22 @@ struct RootView: View {
         return EdgeInsets(top: 0, leading: 0, bottom: 60, trailing: 0)
     }
 
-    private var statusColor: Color {
-        guard core.connected else { return .red }
-        guard let s = core.sessions.first(where: { $0.id == selected }), s.status == .running else { return .green }
-        switch core.liveActivity(s) {
-        case .busy: return Tok.blue
-        case .waitingInput: return Tok.waiting
-        default: return .green
-        }
-    }
-
     var body: some View {
         NavigationStack {
             Group {
                 if let id = selected {
-                    SessionView(core: core, sessionId: id, terminalInset: terminalInset).id(id)
+                    SessionView(core: core, sessionId: id, terminalInset: terminalInset, unpair: unpair).id(id)
                 } else {
                     ContentUnavailableView("No session", systemImage: "terminal",
                                            description: Text(core.lastError ?? "Tap ⌃ for actions, then ☰ or ⚡︎."))
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Menu {
-                        Text(core.connected ? "Connected" : core.lastError ?? "Disconnected")
-                        if dockX != 0 || dockY != 0 {
-                            Button("Reset actions position", systemImage: "arrow.down.right.and.arrow.up.left") {
-                                withAnimation(.snappy) { dockX = 0; dockY = 0 }
-                            }
-                        }
-                        Button("Unpair", role: .destructive, action: unpair)
-                    } label: {
-                        // Connection, then the open session's activity, as one line.
-                        // Hugs the screen edge: the bar's margin would otherwise take title room.
-                        Capsule().fill(statusColor).frame(width: 4, height: 22).padding(.leading, -10)
-                    }
-                    .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
+                // With a session open, SessionView draws its own header around the line.
+                if selected == nil {
+                    ToolbarItem(placement: .topBarLeading) { StatusLine(core: core, sessionId: nil, unpair: unpair) }
+                        .hidingSharedBackground()
                 }
-                .hidingSharedBackground()
             }
         }
         .overlay {
@@ -315,6 +293,42 @@ private extension View {
             .opacity(shown ? 1 : 0)
             .animation(.spring(response: 0.38, dampingFraction: 0.82)
                 .delay(shown ? Double(order) * 0.03 : Double(max(0, 5 - order)) * 0.02), value: shown)
+    }
+}
+
+/// Connection, then the open session's activity, as one coloured line; its menu holds the
+/// connection state, the dock reset and Unpair.
+struct StatusLine: View {
+    let core: RemoteCore
+    let sessionId: String?
+    let unpair: () -> Void
+    @AppStorage("dockX") private var dockX = 0.0
+    @AppStorage("dockY") private var dockY = 0.0
+
+    private var color: Color {
+        guard core.connected else { return .red }
+        guard let s = core.sessions.first(where: { $0.id == sessionId }), s.status == .running else { return .green }
+        switch core.liveActivity(s) {
+        case .busy: return Tok.blue
+        case .waitingInput: return Tok.waiting
+        default: return .green
+        }
+    }
+
+    var body: some View {
+        Menu {
+            Text(core.connected ? "Connected" : core.lastError ?? "Disconnected")
+            if dockX != 0 || dockY != 0 {
+                Button("Reset actions position", systemImage: "arrow.down.right.and.arrow.up.left") {
+                    withAnimation(.snappy) { dockX = 0; dockY = 0 }
+                }
+            }
+            Button("Unpair", role: .destructive, action: unpair)
+        } label: {
+            Capsule().fill(color).frame(width: 4, height: 22)
+                .frame(width: 20, height: 44) // a thumb-sized target around a thin line
+        }
+        .accessibilityLabel(core.connected ? "Connected" : "Disconnected")
     }
 }
 

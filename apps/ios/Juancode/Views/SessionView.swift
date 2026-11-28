@@ -9,6 +9,7 @@ struct SessionView: View {
     let sessionId: String
     /// Room left for the dock (`RootView.terminalInset`), so it never covers terminal text.
     var terminalInset = EdgeInsets()
+    var unpair: () -> Void = {}
     @State private var line = ""
     @State private var alerts: AlertsState?
     @State private var recorder = VoiceRecorder()
@@ -19,6 +20,7 @@ struct SessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            header
             contextBar
             TerminalPane(core: core, sessionId: sessionId)
                 .padding(terminalInset)
@@ -45,17 +47,8 @@ struct SessionView: View {
             }
             .padding(8)
         }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                // Only the status line and "…" share the bar, so the title gets the width for two lines.
-                Text(core.sessions.first { $0.id == sessionId }?.title ?? "")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(Tok.text)
-                    .lineLimit(2).multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            ToolbarItem(placement: .topBarTrailing) { sessionMenu }
-        }
+        // Our own header: the system bar centres its title no matter what.
+        .toolbar(.hidden, for: .navigationBar)
         .task { if core.pairing.oracle != nil { alerts = try? await AlertsClient.fetch(core.pairing) } }
         .confirmationDialog("Stop this session?", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Stop session", role: .destructive) { core.kill(sessionId) }
@@ -95,6 +88,19 @@ struct SessionView: View {
         }
         .disabled(transcribing)
         .accessibilityLabel(transcribing ? "Transcribing" : "Stop recording")
+    }
+
+    /// Status line hugging the left edge, the title left-aligned over two lines, "…" on the right.
+    private var header: some View {
+        HStack(spacing: 6) {
+            StatusLine(core: core, sessionId: sessionId, unpair: unpair)
+            Text(core.sessions.first { $0.id == sessionId }?.title ?? "")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(Tok.text)
+                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+            sessionMenu.font(.title3).frame(width: 44, height: 44)
+        }
+        .padding(.trailing, 6)
+        .frame(minHeight: 44)
     }
 
     /// The context meter as a hairline under the title: full width, so it costs no header room.
