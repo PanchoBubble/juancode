@@ -161,6 +161,10 @@ pub struct CreateRequest {
     /// numbers a family of trees off one question — and an unusable one is refused
     /// rather than silently replaced, same as any other part of the isolation promise.
     pub worktree_name: Option<String>,
+    /// With `isolate_worktree`: check this EXISTING branch out into a pool slot
+    /// instead of cutting `juancode/<name>` (a tracked PR's head branch). The slot is
+    /// recorded like any other, so deleting the session gives it back.
+    pub checkout_branch: Option<String>,
     pub dispatch_id: Option<String>,
     /// The connection that will drive this session's grid. It claims ownership up
     /// front: the client that spawned a session at a size owns that size.
@@ -947,8 +951,10 @@ impl SessionRegistry {
                 .worktree_name
                 .clone()
                 .unwrap_or_else(|| id.chars().take(8).collect::<String>());
-            let made =
-                self.with_pool(|pool| worktree::pool::create_timed(&req.cwd, &name, pool))?;
+            let made = self.with_pool(|pool| match &req.checkout_branch {
+                Some(branch) => worktree::pool::checkout_timed(&req.cwd, branch, pool),
+                None => worktree::pool::create_timed(&req.cwd, &name, pool),
+            })?;
             Some((made, name))
         } else {
             None
@@ -1036,6 +1042,13 @@ impl SessionRegistry {
         };
         match self.spawn_into(&id, &live, plan) {
             Ok(()) => {
+                // `created` is a private reply to the spawning socket. Existing
+                // desktop/sidecar connections also need the row, even if the
+                // requester disconnects before the CLI produces any activity.
+                let _ = self.inner.events.send(SessionEvent::Meta {
+                    session_id: id.clone(),
+                    meta: self.meta(&id).unwrap_or_else(|| meta.clone()),
+                });
                 self.start_id_discovery(&id, &live, req.provider, meta.created_at);
                 // The claim the spawn was made under is public from the start, so a
                 // second viewer never has to infer who is driving.
@@ -1487,8 +1500,8 @@ impl SessionRegistry {
     /// This is the Swift core's `persistMeta` and its `onMetaChange` listener in one
     /// place, and the reason a new meta field needs no new emit.
     ///
-    /// The snapshot edits — `created`, `attached` — stay out of it: they carry the
-    /// whole row already, and an exit has `exit` to announce itself with.
+    /// Snapshot replies do not edit metadata. A successful create separately
+    /// broadcasts its initial row so clients other than the requester discover it.
     fn edit_meta(
         &self,
         id: &str,
@@ -1795,6 +1808,25 @@ impl SessionRegistry {
             changed
         });
         Ok(())
+    }
+
+    /// Record the session that dispatched this one (`create.fromSessionId`), so a client
+    /// can show where a dispatched agent came from. Only a session this registry knows
+    /// is recorded; anything else leaves the row untouched.
+    pub fn set_parent_session(&self, id: &str, parent: &str) -> bool {
+        if id == parent || self.get(parent).is_none() {
+            return false;
+        }
+        let Some(live) = self.get(id) else {
+            return false;
+        };
+        self.edit_meta(id, &live, |meta| {
+            if meta.parent_session_id.as_deref() == Some(parent) {
+                return false;
+            }
+            meta.parent_session_id = Some(parent.to_string());
+            true
+        })
     }
 
     // MARK: - internals

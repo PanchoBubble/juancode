@@ -28,6 +28,8 @@
 // ignored). Replies are chunked to Telegram's 4096-char per-message limit.
 
 import { telegramChat } from "./telegram-chat.ts";
+import { fetchMessages } from "./session-reads.ts";
+import { latestAssistantResponse } from "./session-notifications.ts";
 import { clearTelegramSession, getTelegramSession, setTelegramSession } from "./telegram-store.ts";
 import {
   listObserved,
@@ -62,13 +64,7 @@ import {
   type TriggerOrigin,
 } from "./dispatch-registry.ts";
 import { resolveObserverChatIds } from "./observer-trigger.ts";
-import {
-  deliverReply,
-  listSessions,
-  queueMessages,
-  sendKeys,
-  type ChatReply,
-} from "./oracle.ts";
+import { deliverReply, listSessions, queueMessages, sendKeys, type ChatReply } from "./oracle.ts";
 import { unknownKey, unknownKeyMessage } from "./keys.ts";
 import {
   attention,
@@ -365,6 +361,9 @@ export interface TelegramDeps {
    *  session nobody typed says where it came from. Optional — omitted in tests
    *  that don't care. */
   originTrigger?: (dispatchId: string) => Promise<TriggerOrigin | null>;
+  /** The agent's final reply of its latest turn, so a finish ping says what it did.
+   *  Optional — omitted in tests that don't care. */
+  lastReply?: (sessionId: string) => Promise<string>;
   /** Type text straight into a session's pty (waiting/idle sessions). */
   deliver: (sessionId: string, text: string) => Promise<void>;
   /** Queue text for in-order delivery on the session's next idle (busy sessions). */
@@ -414,6 +413,7 @@ function defaultDeps(token: string): TelegramDeps {
     outbound: { record: recordOutbound, lookup: lookupOutbound },
     originChat: dispatchOriginChat,
     originTrigger: dispatchTriggerOrigin,
+    lastReply: async (id) => latestAssistantResponse((await fetchMessages(id, 12)).messages),
     deliver: deliverReply,
     queue: queueMessages,
     keys: sendKeys,
@@ -1125,7 +1125,12 @@ export async function notifySessionEvent(
   // Mirror the desktop change badge into the finish ping: "finished its turn,
   // 3 files changed (+120/−44)" when the settled turn left unreviewed changes.
   const badge = kind === "finished" ? changesText(ev.changes) : null;
-  const text = `${notifyIcon(kind)} ${header}${via}\n${notifyText(kind)}${badge ? `, ${badge}` : ""}\n${hint}`;
+  let reply = "";
+  if (kind === "finished" && deps.lastReply) {
+    const r = (await deps.lastReply(ev.sessionId).catch(() => "")).trim();
+    if (r) reply = `\n\n${r.length > REPLY_CHARS ? `${r.slice(0, REPLY_CHARS)}…` : r}\n`;
+  }
+  const text = `${notifyIcon(kind)} ${header}${via}\n${notifyText(kind)}${badge ? `, ${badge}` : ""}${reply}\n${hint}`;
 
   for (const chatId of chats) {
     const key = `${chatId}:${ev.sessionId}`;
@@ -1153,6 +1158,9 @@ export async function notifySessionEvent(
     }
   }
 }
+
+/** How much of the agent's last reply a finish ping carries (Telegram caps a message at 4096). */
+const REPLY_CHARS = 1500;
 
 /** How long a chat is left alone about one session after a stuck advisory. */
 export const STUCK_COOLDOWN_MS = 15 * 60 * 1000;

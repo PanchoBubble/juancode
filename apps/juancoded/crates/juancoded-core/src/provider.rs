@@ -47,6 +47,12 @@ pub enum IdSource {
     /// and mirrors `{sessionId, sessionDir, workDir}` lines into its own
     /// `session_index.jsonl`, which is what we read.
     KimiIndex,
+    /// agy keeps its conversations under `~/.gemini/antigravity/` (a `brain/<id>/`
+    /// directory per conversation plus a SQLite index). Nothing reads that store yet,
+    /// so an agy session starts and stays unresumable by id after a restart.
+    AntigravityStore,
+    /// Cursor session discovery is not implemented; never resume an unrelated chat.
+    CursorStore,
 }
 
 /// Pure description of how to launch/resume a provider. No binary resolution here
@@ -275,6 +281,74 @@ fn kimi_preset_args_start(preset: Option<&Preset>) -> Vec<String> {
     }
 }
 
+/// agy's `--dangerously-skip-permissions`, which auto-approves every tool request.
+/// (`--mode auto` is a different thing: the agent's own execution mode, not a
+/// prompt bypass.)
+fn antigravity_perm_args(skip: bool) -> Vec<String> {
+    if skip {
+        vec!["--dangerously-skip-permissions".into()]
+    } else {
+        vec![]
+    }
+}
+
+/// agy's `--agent <name>`, naming an agent from the user's own config (`agy agents`
+/// lists them) — select-not-append, like opencode's and kimi's flag. START only: agy
+/// documents no combination of `--agent` with `--conversation`, so a resume does not
+/// send it rather than risk an argv the CLI refuses.
+fn antigravity_preset_args_start(preset: Option<&Preset>) -> Vec<String> {
+    match preset.map(|p| p.name.as_str()) {
+        Some(name) if !name.is_empty() => vec!["--agent".to_string(), name.to_string()],
+        _ => vec![],
+    }
+}
+
+pub const ANTIGRAVITY: ProviderSpec = ProviderSpec {
+    id: ProviderId::Antigravity,
+    label: "Antigravity",
+    id_source: IdSource::AntigravityStore,
+    bracketed_paste: true,
+    // agy has no flag to pin a conversation id (`--conversation` RESUMES one), so a
+    // fresh session starts clean and the id has to be read out of agy's own store.
+    start_args: |_, opts| {
+        let mut a = antigravity_perm_args(opts.skip_permissions);
+        a.extend(model_args(&opts.model));
+        a.extend(antigravity_preset_args_start(opts.preset.as_ref()));
+        a
+    },
+    resume_args: |cli_session_id, opts| {
+        let mut a = vec!["--conversation".to_string(), cli_session_id.to_string()];
+        a.extend(antigravity_perm_args(opts.skip_permissions));
+        a.extend(model_args(&opts.model));
+        a
+    },
+    spawn_env: no_env,
+};
+
+fn cursor_args(opts: &SpawnOptions) -> Vec<String> {
+    let mut args = if opts.skip_permissions {
+        vec!["--force".into(), "--sandbox".into(), "disabled".into()]
+    } else {
+        vec![]
+    };
+    args.extend(model_args(&opts.model));
+    args
+}
+
+pub const CURSOR: ProviderSpec = ProviderSpec {
+    id: ProviderId::Cursor,
+    label: "Cursor",
+    id_source: IdSource::CursorStore,
+    bracketed_paste: true,
+    start_args: |_, opts| cursor_args(opts),
+    resume_args: |id, opts| {
+        let mut args = vec!["--resume".into(), id.to_string()];
+        args.extend(cursor_args(opts));
+        args
+    },
+    spawn_env: no_env,
+};
+
 pub struct Providers;
 
 impl Providers {
@@ -284,6 +358,8 @@ impl Providers {
             ProviderId::Codex => &CODEX,
             ProviderId::Opencode => &OPENCODE,
             ProviderId::Kimi => &KIMI,
+            ProviderId::Antigravity => &ANTIGRAVITY,
+            ProviderId::Cursor => &CURSOR,
         }
     }
 }
@@ -295,7 +371,19 @@ fn bin_override_key(provider: &str) -> Option<&'static str> {
         "codex" => Some("JUANCODE_CODEX_BIN"),
         "opencode" => Some("JUANCODE_OPENCODE_BIN"),
         "kimi" => Some("JUANCODE_KIMI_BIN"),
+        "antigravity" => Some("JUANCODE_ANTIGRAVITY_BIN"),
+        "cursor" => Some("JUANCODE_CURSOR_BIN"),
         _ => None,
+    }
+}
+
+/// The command a provider's CLI is run as. Every provider's is its own id except
+/// antigravity, whose binary is `agy`.
+pub fn bin_command(provider: &str) -> &str {
+    match provider {
+        "antigravity" => "agy",
+        "cursor" => "cursor-agent",
+        other => other,
     }
 }
 
@@ -313,7 +401,7 @@ pub fn bin_override(provider: &str) -> Option<String> {
 /// means the conformance suite's fake agent is quietly ignored in favour of the real
 /// `claude`. Folding the override into the lookup makes forgetting it unwritable.
 pub fn resolve_provider_bin(provider: &str) -> Option<String> {
-    resolve_bin(provider, bin_override(provider).as_deref())
+    resolve_bin(bin_command(provider), bin_override(provider).as_deref())
 }
 
 /// Resolve a command to the SAME absolute path the user's interactive terminal would.
@@ -769,10 +857,12 @@ mod tests {
             (CODEX.start_args)("abc", &plain),
             (OPENCODE.start_args)("abc", &plain),
             (KIMI.start_args)("abc", &plain),
+            (ANTIGRAVITY.start_args)("abc", &plain),
             (CLAUDE.resume_args)("sid", &plain),
             (CODEX.resume_args)("sid", &plain),
             (OPENCODE.resume_args)("sid", &plain),
             (KIMI.resume_args)("sid", &plain),
+            (ANTIGRAVITY.resume_args)("sid", &plain),
         ] {
             for flag in ["--append-system-prompt", "--profile", "--agent"] {
                 assert!(!args.iter().any(|a| a == flag), "{args:?} carries {flag}");
@@ -831,6 +921,96 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_resumes_by_conversation_and_bypasses_through_its_own_flag() {
+        let plain = SpawnOptions::default();
+        assert!((ANTIGRAVITY.start_args)("abc", &plain).is_empty());
+        assert_eq!(
+            (ANTIGRAVITY.resume_args)("cid", &plain),
+            vec!["--conversation".to_string(), "cid".to_string()]
+        );
+
+        let opts = SpawnOptions {
+            skip_permissions: true,
+            model: Some("m".into()),
+            preset: Some(Preset {
+                name: "review".into(),
+                body: None,
+            }),
+        };
+        // The preset selects an agent on START only; agy documents no `--agent` with
+        // `--conversation`, so the resume drops it rather than send an argv it may refuse.
+        assert_eq!(
+            (ANTIGRAVITY.start_args)("abc", &opts),
+            vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--model".to_string(),
+                "m".to_string(),
+                "--agent".to_string(),
+                "review".to_string()
+            ]
+        );
+        assert_eq!(
+            (ANTIGRAVITY.resume_args)("cid", &opts),
+            vec![
+                "--conversation".to_string(),
+                "cid".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "--model".to_string(),
+                "m".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_runs_the_agy_binary_but_overrides_by_its_own_name() {
+        assert_eq!(bin_command("antigravity"), "agy");
+        assert_eq!(bin_command("claude"), "claude");
+        assert_eq!(
+            ProviderId::parse("antigravity"),
+            Some(ProviderId::Antigravity)
+        );
+        assert_eq!(ProviderId::Antigravity.as_str(), "antigravity");
+    }
+
+    #[test]
+    fn cursor_launch_contract() {
+        let spec = Providers::spec(ProviderId::Cursor);
+        assert_eq!(ProviderId::parse("cursor"), Some(ProviderId::Cursor));
+        assert_eq!(ProviderId::Cursor.as_str(), "cursor");
+        assert_eq!(bin_command("cursor"), "cursor-agent");
+        assert_eq!(bin_override_key("cursor"), Some("JUANCODE_CURSOR_BIN"));
+        assert!(!spec.pins_session_id());
+        assert!((spec.start_args)("not-a-cursor-id", &SpawnOptions::default()).is_empty());
+        let opts = SpawnOptions {
+            skip_permissions: true,
+            model: Some("chosen-model".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            (spec.start_args)("ours", &opts),
+            [
+                "--force",
+                "--sandbox",
+                "disabled",
+                "--model",
+                "chosen-model"
+            ]
+        );
+        assert_eq!(
+            (spec.resume_args)("chat-id", &opts),
+            [
+                "--resume",
+                "chat-id",
+                "--force",
+                "--sandbox",
+                "disabled",
+                "--model",
+                "chosen-model"
+            ]
+        );
+    }
+
+    #[test]
     fn codex_resume_puts_the_id_last() {
         let opts = SpawnOptions::default();
         assert_eq!(
@@ -845,7 +1025,7 @@ mod tests {
         // `spawn_env` is the empty overlay for all of them and the child inherits
         // `environ` verbatim. opencode's OPENCODE_PERMISSION entry is gone: `--auto`
         // is the documented flag and the indirection was only ever a workaround.
-        for provider in [&CLAUDE, &CODEX, &OPENCODE, &KIMI] {
+        for provider in [&CLAUDE, &CODEX, &OPENCODE, &KIMI, &ANTIGRAVITY, &CURSOR] {
             let plain = SpawnOptions::default();
             let bypass = SpawnOptions {
                 skip_permissions: true,
@@ -907,6 +1087,7 @@ mod tests {
             ("codex", "JUANCODE_CODEX_BIN"),
             ("opencode", "JUANCODE_OPENCODE_BIN"),
             ("kimi", "JUANCODE_KIMI_BIN"),
+            ("antigravity", "JUANCODE_ANTIGRAVITY_BIN"),
         ] {
             assert_eq!(bin_override_key(provider), Some(key));
         }
@@ -921,6 +1102,7 @@ mod tests {
         assert!(!CODEX.pins_session_id());
         assert!(!OPENCODE.pins_session_id());
         assert!(!KIMI.pins_session_id());
+        assert!(!ANTIGRAVITY.pins_session_id());
         assert_eq!(CODEX.id_source, IdSource::CodexRollout);
         assert_eq!(OPENCODE.id_source, IdSource::OpencodeDb);
         assert_eq!(KIMI.id_source, IdSource::KimiIndex);

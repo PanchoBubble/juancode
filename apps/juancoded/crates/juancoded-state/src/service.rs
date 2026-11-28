@@ -132,6 +132,11 @@ pub trait SessionsApi: Send + Sync {
         title: Option<&str>,
         archived: Option<bool>,
     ) -> Result<(), StateError>;
+    /// Record the session that dispatched `id` (`create.fromSessionId`). False when
+    /// either is unknown or nothing changed.
+    fn set_parent_session(&self, _id: &str, _parent: &str) -> bool {
+        false
+    }
     fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError>;
     /// A session's pending steering messages, in delivery order. The whole list, so
     /// a consumer replaces what it holds instead of patching it.
@@ -378,6 +383,10 @@ impl SessionsApi for SessionRegistry {
         archived: Option<bool>,
     ) -> Result<(), StateError> {
         SessionRegistry::set_meta(self, id, title, archived)
+    }
+
+    fn set_parent_session(&self, id: &str, parent: &str) -> bool {
+        SessionRegistry::set_parent_session(self, id, parent)
     }
 
     fn input(&self, id: &str, data: &[u8]) -> Result<(), StateError> {

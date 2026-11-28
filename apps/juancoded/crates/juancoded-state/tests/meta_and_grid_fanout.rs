@@ -19,6 +19,25 @@ use tokio::sync::broadcast::Receiver;
 const DESKTOP: u64 = 1;
 const PHONE: u64 = 2;
 
+#[tokio::test]
+async fn a_new_session_is_announced_to_existing_clients_without_an_attach() {
+    let harness = Harness::new("create-fanout");
+    let mut desktop = harness.sessions.subscribe();
+    let mut sidecar = harness.sessions.subscribe();
+    let id = harness.create("/tmp", 80, 24, PHONE).await;
+    // The short-lived dispatch client has gone; the desktop never attached.
+    harness.sessions.release_client(PHONE);
+
+    for observer in [&mut desktop, &mut sidecar] {
+        let row = next_meta(observer, &id).await;
+        assert_eq!(row.id, id);
+        assert_eq!(row.cwd, "/tmp");
+        assert_eq!(row.title, "tmp");
+        assert_eq!(row.status, juancoded_core::model::SessionStatus::Running);
+    }
+    assert_eq!(harness.sessions.ids().len(), 1);
+}
+
 /// The next grid change for `id`, as `(owner, cols, rows)`.
 async fn next_grid(rx: &mut Receiver<SessionEvent>, id: &str) -> (Option<u64>, u16, u16) {
     match wait_for(
@@ -103,8 +122,8 @@ async fn a_denied_resize_names_the_owner_the_client_has_to_wait_for() {
 #[tokio::test]
 async fn a_window_title_the_cli_sets_for_itself_becomes_the_session_title() {
     let harness = Harness::new("osc-title");
-    let mut events = harness.sessions.subscribe();
     let id = harness.create("/tmp", 80, 24, DESKTOP).await;
+    let mut events = harness.sessions.subscribe();
 
     let before = harness.sessions.meta(&id).expect("a row").title;
     assert_eq!(before, "tmp", "the row starts at the directory basename");
@@ -143,8 +162,8 @@ async fn a_window_title_the_cli_sets_for_itself_becomes_the_session_title() {
 #[tokio::test]
 async fn a_meta_change_reaches_a_client_that_never_attached() {
     let harness = Harness::new("meta-broadcast");
-    let mut events = harness.sessions.subscribe();
     let id = harness.create("/tmp", 80, 24, DESKTOP).await;
+    let mut events = harness.sessions.subscribe();
 
     // A second subscriber that never attached to anything: the row is a fact about
     // the session, not a reply to a request.
@@ -167,8 +186,8 @@ async fn a_meta_change_reaches_a_client_that_never_attached() {
 #[tokio::test]
 async fn an_empty_or_unchanged_title_is_not_a_meta_change() {
     let harness = Harness::new("title-noise");
-    let mut events = harness.sessions.subscribe();
     let id = harness.create("/tmp", 80, 24, DESKTOP).await;
+    let mut events = harness.sessions.subscribe();
 
     // An OSC that resets the title, and one that sets it to whitespace: neither is a
     // name, so neither may move the row.

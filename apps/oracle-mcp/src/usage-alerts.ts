@@ -14,22 +14,10 @@
 
 import type { SessionUsageSample } from "./native-events.ts";
 
-/** Default context warn line, mirroring `ContextPressure.warnFraction` in the Swift
- *  core. Kept in agreement by hand: the core needs it for the badge tint, the
- *  sidecar for the ping, and neither reads the other's settings. */
-export const DEFAULT_CONTEXT_FRACTION = 0.8;
-
 /** How far back below the line a session has to fall before another crossing can
  *  fire. Without it a reading hovering on the boundary would alternate in and out of
  *  the band and ping on every re-entry. */
 export const REARM_MARGIN = 0.05;
-
-/** Default handoff line in absolute tokens (juancode-u5q), mirroring
- *  `ContextPressure.defaultHandoffTokens` in the Swift core. A window fraction is the
- *  wrong unit for cost: 0.8 of a 1M window is 800k, far past the point where re-reading
- *  the conversation every turn dominates the spend. Past this line a handoff to a fresh
- *  session seeded with a short note is the cheaper way on. */
-export const DEFAULT_HANDOFF_TOKENS = 250_000;
 
 export interface UsageAlertThresholds {
   /** Context fraction that trips an alert; 0 disables context alerts. */
@@ -42,21 +30,20 @@ export interface UsageAlertThresholds {
 
 /** Read the thresholds from the environment.
  *
- *  `JUANCODE_CONTEXT_ALERT_PERCENT` is a percentage (80 → 0.8) because that is how
- *  it reads in the message; 0 turns context alerts off. `JUANCODE_SESSION_SPEND_CAP_USD`
- *  is off unless set — a spend cap is a personal number, so there is no sensible
- *  default to impose. `JUANCODE_HANDOFF_ALERT_TOKENS` is the handoff line in tokens;
- *  0 turns it off. All fall back to the default on anything unparseable rather
- *  than throwing at startup. */
+ *  Every alert is OFF unless its variable is set: none of them needs a reply, and
+ *  Telegram is for sessions that do. `JUANCODE_CONTEXT_ALERT_PERCENT` is a percentage
+ *  (80 → 0.8) because that is how it reads in the message. `JUANCODE_SESSION_SPEND_CAP_USD`
+ *  is in dollars. `JUANCODE_HANDOFF_ALERT_TOKENS` is the handoff line in absolute tokens
+ *  (the Swift badge's line is 250k), not a window fraction, because 0.8 of a 1M window
+ *  is far past where re-reading the conversation dominates spend. Anything unparseable
+ *  means off rather than a throw at startup. */
 export function readUsageAlertThresholds(
   env: NodeJS.ProcessEnv = process.env,
 ): UsageAlertThresholds {
   const rawPercent = (env.JUANCODE_CONTEXT_ALERT_PERCENT ?? "").trim();
   const percent = rawPercent === "" ? NaN : Number(rawPercent);
   const contextFraction =
-    Number.isFinite(percent) && percent >= 0 && percent <= 100
-      ? percent / 100
-      : DEFAULT_CONTEXT_FRACTION;
+    Number.isFinite(percent) && percent >= 0 && percent <= 100 ? percent / 100 : 0;
 
   const rawCap = (env.JUANCODE_SESSION_SPEND_CAP_USD ?? "").trim();
   const cap = rawCap === "" ? NaN : Number(rawCap);
@@ -64,8 +51,7 @@ export function readUsageAlertThresholds(
 
   const rawHandoff = (env.JUANCODE_HANDOFF_ALERT_TOKENS ?? "").trim();
   const handoff = rawHandoff === "" ? NaN : Number(rawHandoff);
-  const handoffTokens =
-    Number.isInteger(handoff) && handoff >= 0 ? handoff : DEFAULT_HANDOFF_TOKENS;
+  const handoffTokens = Number.isInteger(handoff) && handoff >= 0 ? handoff : 0;
 
   return { contextFraction, spendCapUsd, handoffTokens };
 }

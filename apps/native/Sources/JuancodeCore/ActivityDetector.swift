@@ -488,7 +488,7 @@ public final class ActivityDetector: @unchecked Sendable {
         PromptPattern(label: "yn-paren", re: Regex(#"\(y/n\)"#, caseInsensitive: true), bottomOnly: true),
         PromptPattern(label: "yn-bracket", re: Regex(#"\[y/n\]"#, caseInsensitive: true), bottomOnly: true),
         PromptPattern(label: "press-enter", re: Regex(#"\bPress Enter to continue\b"#, caseInsensitive: true), bottomOnly: true),
-        PromptPattern(label: "esc-cancel", re: Regex(#"\(esc to cancel\)"#, caseInsensitive: true), bottomOnly: true),
+        PromptPattern(label: "esc-cancel", re: Regex(#"\besc to cancel\b"#, caseInsensitive: true), bottomOnly: true),
     ]
 
     /// Cheap lowercase substrings that gate the idle→waiting re-read: only a frame

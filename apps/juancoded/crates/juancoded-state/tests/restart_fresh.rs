@@ -125,6 +125,7 @@ async fn the_session_a_revive_gives_up_on_is_the_one_a_restart_serves() {
             preset: None,
             isolate_worktree: false,
             worktree_name: None,
+            checkout_branch: None,
             dispatch_id: None,
             owner: 1,
         })

@@ -2,6 +2,40 @@ import Testing
 @testable import JuancodeApp
 
 @Suite @MainActor struct PanelNavigationTests {
+    @Test func sessionKeysActOnlyOnTheFocusedRow() {
+        let nav = PanelNavigation()
+        var calls: [String] = []
+        nav.begin(.sessions, rows: [
+            PanelNavigationRow(id: "project", actions: [
+                PanelRowAction(id: "new", label: "New", perform: { calls.append("new") })
+            ], open: {}),
+            PanelNavigationRow(id: "session", actions: ["close", "delete", "rename", "pin", "editor"].map { id in
+                PanelRowAction(id: id, label: id, perform: { calls.append(id) })
+            }, open: {})
+        ])
+        #expect(nav.handle(8)) // c on a project must not close or move
+        #expect(nav.cursor.rowID == "project")
+        #expect(nav.handle(45))
+        #expect(calls == ["new"])
+        #expect(nav.handle(125))
+        #expect(nav.handle(8))
+        #expect(nav.handle(2))
+        #expect(nav.handle(14))
+        #expect(nav.handle(35))
+        #expect(nav.performAction("editor"))
+        #expect(calls == ["new", "close", "delete", "rename", "pin", "editor"])
+        nav.update([PanelNavigationRow(id: "session", open: {})])
+        #expect(nav.handle(8)) // unavailable close cannot call a stale action
+        #expect(nav.handle(2))
+        #expect(calls.count == 6)
+        nav.update([PanelNavigationRow(id: "project", open: {}), PanelNavigationRow(id: "session", open: {})])
+        #expect(nav.handle(40)) // k navigates up again
+        #expect(nav.cursor.rowID == "project")
+        #expect(calls.count == 6)
+        nav.end()
+        #expect(!nav.performAction("editor"))
+    }
+
     @Test func onlyEnterActivates() {
         let nav = PanelNavigation()
         var opened: [String] = []

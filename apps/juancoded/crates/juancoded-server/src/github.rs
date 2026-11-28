@@ -937,7 +937,10 @@ mod pr_location_tests {
         let location = pr_location(None, None, some(URL)).unwrap();
         assert_eq!(location.number, 42);
         assert_eq!(location.reference.unwrap().repo, "widgets");
-        assert!(pr_location(some(" "), Some(42), some(URL)).unwrap().reference.is_some());
+        assert!(pr_location(some(" "), Some(42), some(URL))
+            .unwrap()
+            .reference
+            .is_some());
     }
 
     #[test]
@@ -946,11 +949,18 @@ mod pr_location_tests {
             (None, None, None),
             (None, Some(42), None),
             (some("/work"), None, None),
-            (None, None, some("https://github.com/acme/widgets/issues/42")),
+            (
+                None,
+                None,
+                some("https://github.com/acme/widgets/issues/42"),
+            ),
             (None, Some(7), some(URL)),
             (some("/work"), Some(0), None),
         ] {
-            assert!(pr_location(cwd.clone(), number, url.clone()).is_err(), "{cwd:?} {number:?} {url:?}");
+            assert!(
+                pr_location(cwd.clone(), number, url.clone()).is_err(),
+                "{cwd:?} {number:?} {url:?}"
+            );
         }
     }
 }

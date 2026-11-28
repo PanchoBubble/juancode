@@ -93,6 +93,7 @@ fn request(provider: ProviderId, cwd: &str) -> CreateRequest {
         preset: None,
         isolate_worktree: false,
         worktree_name: None,
+        checkout_branch: None,
         dispatch_id: None,
         owner: 1,
     }
@@ -274,6 +275,9 @@ async fn a_conversation_id_discovered_after_the_spawn_is_broadcast_not_only_stor
         } = event
         {
             assert_eq!(session_id, meta.id);
+            if row.cli_session_id.is_none() {
+                continue; // The initial spawn announcement precedes discovery.
+            }
             assert_eq!(
                 row.cli_session_id.as_deref(),
                 Some("codex-conversation-late"),

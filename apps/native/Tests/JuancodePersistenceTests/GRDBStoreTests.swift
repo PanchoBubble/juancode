@@ -149,11 +149,15 @@ final class GRDBStoreTests: XCTestCase {
         // without one stay nil (interactive creates).
         var m = meta("dispatched")
         m.dispatchId = "d-42"
+        m.parentSessionId = "dispatcher"
         store.insert(m)
         XCTAssertEqual(store.get("dispatched")?.dispatchId, "d-42")
         m.title = "renamed"
         store.updateMeta(m)
         XCTAssertEqual(store.get("dispatched")?.dispatchId, "d-42")
+        // The chain graph's "dispatched" edge for a session that is no longer live.
+        XCTAssertEqual(store.get("dispatched")?.parentSessionId, "dispatcher")
+        XCTAssertEqual(store.list().first { $0.id == "dispatched" }?.parentSessionId, "dispatcher")
 
         store.insert(meta("interactive"))
         XCTAssertNil(store.get("interactive")?.dispatchId)

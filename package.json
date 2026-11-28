@@ -17,6 +17,7 @@
     "dev:oracle": "pnpm --filter @juancode/oracle-mcp dev",
     "dev:app": "apps/native/scripts/watch-app.sh",
     "jc": "scripts/juancode.sh",
+    "remote": "scripts/remote.sh",
     "daemon": "scripts/dev-daemon.sh",
     "daemon:status": "scripts/dev-daemon.sh status",
     "daemon:stop": "scripts/dev-daemon.sh stop",

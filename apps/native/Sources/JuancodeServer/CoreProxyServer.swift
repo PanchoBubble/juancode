@@ -210,6 +210,7 @@ public enum CoreProxyServer {
         wsRouter.ws("/ws") { inbound, outbound, _ in
             let session = URLSession(configuration: .ephemeral)
             let task = session.webSocketTask(with: upstream)
+            task.maximumMessageSize = 64 << 20 // default 1 MB; a full session list outgrew it
             task.resume()
             defer {
                 task.cancel(with: .goingAway, reason: nil)

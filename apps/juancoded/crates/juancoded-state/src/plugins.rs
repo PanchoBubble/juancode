@@ -158,6 +158,7 @@ pub fn entries_over_store(store: &str) -> EntryList {
         // outlives one.
         .push(Entry::new("queue", "steering-queue"))
         .push(Entry::new("transcript-claude", "transcript-claude"))
+        .push(Entry::new("transcript-codex", "transcript-codex"))
         .push(Entry::new("transcript-opencode", "transcript-opencode"))
         .push(Entry::new("activity-log", "activity-log"))
         .push(Entry::new("session-chrome", "session-chrome"))

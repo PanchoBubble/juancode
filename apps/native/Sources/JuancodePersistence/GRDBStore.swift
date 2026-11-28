@@ -94,6 +94,13 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             if !cols.contains("dispatch_id") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN dispatch_id TEXT")
             }
+            // The dispatcher (juancode chain graph): without it an exited or sleeping
+            // session read back from here loses its "dispatched" edge. The covering
+            // index below must carry it, so the old one is rebuilt.
+            if !cols.contains("parent_session_id") {
+                try db.execute(sql: "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+                try db.execute(sql: "DROP INDEX IF EXISTS idx_sessions_meta")
+            }
             if !cols.contains("mid_turn") {
                 try db.execute(sql: "ALTER TABLE sessions ADD COLUMN mid_turn INTEGER NOT NULL DEFAULT 0")
             }
@@ -116,7 +123,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
                 CREATE INDEX IF NOT EXISTS idx_sessions_meta ON sessions(
                     created_at DESC, id, provider, cwd, title, status, exit_code, updated_at,
                     cli_session_id, skip_permissions, worktree_path, usage, archived, dormant,
-                    dispatch_id
+                    dispatch_id, parent_session_id
                 );
                 """)
 
@@ -279,6 +286,7 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             usage: Self.decodeUsage(r["usage"]),
             archived: (r["archived"] as Int? ?? 0) == 1,
             dormant: (r["dormant"] as Int? ?? 0) == 1,
+            parentSessionId: r["parent_session_id"],
             dispatchId: r["dispatch_id"]
         )
     }
@@ -304,13 +312,13 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
         try? dbQueue.write { db in
             try db.execute(sql: """
                 INSERT INTO sessions (id, provider, cwd, title, status, exit_code, cli_session_id,
-                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
+                                      scrollback, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id, parent_session_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     meta.id, meta.provider.rawValue, meta.cwd, meta.title, meta.status.rawValue,
                     meta.exitCode, meta.cliSessionId, meta.skipPermissions ? 1 : 0,
                     meta.worktreePath, Self.encodeUsage(meta.usage), meta.archived ? 1 : 0,
-                    meta.dormant ? 1 : 0, meta.dispatchId, meta.createdAt, meta.updatedAt,
+                    meta.dormant ? 1 : 0, meta.dispatchId, meta.parentSessionId, meta.createdAt, meta.updatedAt,
                 ])
         }
     }
@@ -321,12 +329,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?, scrollback = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, parent_session_id = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId, text,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.parentSessionId, meta.updatedAt, meta.id,
                 ])
         }
     }
@@ -338,12 +346,12 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
             try db.execute(sql: """
                 UPDATE sessions
                 SET title = ?, status = ?, exit_code = ?, cli_session_id = ?,
-                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, updated_at = ?
+                    skip_permissions = ?, worktree_path = ?, usage = ?, archived = ?, dormant = ?, dispatch_id = ?, parent_session_id = ?, updated_at = ?
                 WHERE id = ?
                 """, arguments: [
                     meta.title, meta.status.rawValue, meta.exitCode, meta.cliSessionId,
                     meta.skipPermissions ? 1 : 0, meta.worktreePath, Self.encodeUsage(meta.usage),
-                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.updatedAt, meta.id,
+                    meta.archived ? 1 : 0, meta.dormant ? 1 : 0, meta.dispatchId, meta.parentSessionId, meta.updatedAt, meta.id,
                 ])
         }
     }
@@ -449,7 +457,8 @@ public final class GRDBStore: PersistentStore, MessageQueuePersistence, TrackedP
     /// means adding it to that index too — `testListUsesCoveringIndex` fails otherwise.
     static let metaColumns = """
         id, provider, cwd, title, status, exit_code, created_at, updated_at, \
-        cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id
+        cli_session_id, skip_permissions, worktree_path, usage, archived, dormant, dispatch_id, \
+        parent_session_id
         """
 
     /// The exact statement `list()` runs, shared with the test that asserts its plan.

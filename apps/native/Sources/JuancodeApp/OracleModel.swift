@@ -27,6 +27,8 @@ final class OracleModel {
     @ObservationIgnored private var didAutoPresentChat = false
     /// Whatever went wrong during bootstrap, surfaced in the dock.
     var setupError: String?
+    /// Drives the "New Oracle" provider chooser sheet (⌘⇧N while the dock is open).
+    var showingNewOracle = false
     /// Whether the dock is expanded (vs. the collapsed floating button). Mirrored onto
     /// `AppModel` so it can treat the open dock as the viewer for Oracle's own
     /// (sidebar-hidden) sessions and clear/suppress their unread notifications.

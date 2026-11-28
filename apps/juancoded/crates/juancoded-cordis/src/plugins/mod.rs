@@ -14,6 +14,7 @@ mod pty_to_grid;
 pub mod queue;
 mod session_chrome;
 mod transcript_claude;
+mod transcript_codex;
 mod transcript_opencode;
 mod vt_terminal;
 
@@ -28,6 +29,7 @@ pub use queue::{
 };
 pub use session_chrome::{SessionChrome, INTERRUPT_ID};
 pub use transcript_claude::TranscriptClaude;
+pub use transcript_codex::TranscriptCodex;
 pub use transcript_opencode::TranscriptOpencode;
 pub use vt_terminal::VtTerminal;
 
@@ -51,6 +53,7 @@ pub fn register_builtins(loader: &mut Loader) {
         .register(Arc::new(SessionGoal))
         .register(Arc::new(crate::services::transcripts::Transcripts))
         .register(Arc::new(TranscriptClaude))
+        .register(Arc::new(TranscriptCodex))
         .register(Arc::new(TranscriptOpencode));
 }
 

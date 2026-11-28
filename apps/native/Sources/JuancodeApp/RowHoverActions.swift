@@ -27,6 +27,9 @@ struct RowHoverActions: View {
     var onTogglePin: (() -> Void)? = nil
     /// Whether the row is currently pinned — drives the glyph, its tint and the tooltip.
     var pinned: Bool = false
+    /// Stop this row's running agent (kill ≠ delete: the session stays); nil hides the
+    /// button — pass nil when nothing is live.
+    var onKill: (() -> Void)? = nil
     var glyphSize: CGFloat = 12
 
     private let corner: CGFloat = 7
@@ -53,6 +56,17 @@ struct RowHoverActions: View {
                 .help(pinned ? "Unpin this session" : "Pin this session")
                 .clickCursor()
             }
+            if let onKill {
+                // Out of the ellipsis menu so a stuck agent is one click away. Red, and
+                // after the pin, so it isn't the tile nearest ▶. Non-destructive: the
+                // session, scrollback and worktree are all kept.
+                Button(action: onKill) {
+                    tile("xmark.octagon.fill", size: glyphSize - 3, tint: .red)
+                }
+                .buttonStyle(.plain)
+                .help("Kill agent — stops it, keeps the session")
+                .clickCursor()
+            }
             if let menuContent {
                 // Last, so the destructive Delete lives one click deeper than the
                 // everyday actions instead of as a ✕ a pixel from ▶ and the pin.
@@ -77,13 +91,15 @@ struct RowHoverActions: View {
     /// One action as a small rounded tile — the Tickets rail's copy-link / Work on
     /// buttons, so hover actions read the same everywhere and each has its own hit
     /// target instead of bare glyphs crowded together.
-    private func tile(_ symbol: String, size: CGFloat, accent: Bool = false) -> some View {
-        Image(systemName: symbol)
+    private func tile(_ symbol: String, size: CGFloat, accent: Bool = false,
+                      tint: Color? = nil) -> some View {
+        let color = tint ?? (accent ? Color.accentColor : nil)
+        return Image(systemName: symbol)
             .font(.system(size: size, weight: .semibold))
-            .foregroundStyle(accent ? Color.accentColor : Color.secondary)
+            .foregroundStyle(color ?? Color.secondary)
             .frame(width: 20, height: 18)
             .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(accent ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.08)))
+                .fill(color.map { $0.opacity(0.2) } ?? Color.primary.opacity(0.08)))
             .contentShape(Rectangle())
     }
 

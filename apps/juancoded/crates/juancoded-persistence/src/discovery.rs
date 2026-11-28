@@ -35,6 +35,8 @@ pub fn window(source: IdSource) -> (Duration, Duration) {
         IdSource::CodexRollout => Duration::from_secs(15 * 60),
         IdSource::OpencodeDb => Duration::from_secs(15 * 60),
         IdSource::KimiIndex => Duration::from_secs(15 * 60),
+        // Nothing scans agy's store yet, so there is nothing to wait for.
+        IdSource::AntigravityStore | IdSource::CursorStore => Duration::ZERO,
     };
     (timeout, Duration::from_millis(1_500))
 }
@@ -47,6 +49,7 @@ pub fn scan_once(source: IdSource, cwd: &str, since_ms: i64) -> Option<String> {
         IdSource::CodexRollout => codex_scan_once(cwd, since_ms, &codex_root()),
         IdSource::OpencodeDb => opencode_scan_once(cwd, since_ms, &opencode_db_path()),
         IdSource::KimiIndex => kimi_scan_once(cwd, since_ms, &kimi_home()),
+        IdSource::AntigravityStore | IdSource::CursorStore => None,
     }
 }
 
@@ -327,7 +330,10 @@ fn kimi_state(root: &Path, session_dir: &str) -> Option<KimiState> {
     } else {
         root.join(session_dir)
     };
-    state_in(&[dir.join("state.json"), dir.join("session-meta").join("state.json")])
+    state_in(&[
+        dir.join("state.json"),
+        dir.join("session-meta").join("state.json"),
+    ])
 }
 
 fn kimi_index_lines(root: &Path) -> Vec<KimiIndexLine> {
@@ -452,8 +458,7 @@ fn kimi_session_files(root: &Path) -> Vec<KimiSessionFile> {
                 dir.join("session-meta").join("state.json"),
             ]
             .into_iter()
-            .find(|p| p.exists())
-            else {
+            .find(|p| p.exists()) else {
                 continue;
             };
             let Ok(mtime) = state_path.metadata().and_then(|m| m.modified()) else {
@@ -471,8 +476,6 @@ fn kimi_session_files(root: &Path) -> Vec<KimiSessionFile> {
     }
     found
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -647,8 +650,7 @@ mod tests {
     /// the tests use arbitrary key names — as kimi does.
     fn kimi_fixture(label: &str) -> PathBuf {
         let root = scratch(label);
-        std::fs::create_dir_all(root.join("sessions/ws-key/ses_kimi"))
-            .expect("session dir");
+        std::fs::create_dir_all(root.join("sessions/ws-key/ses_kimi")).expect("session dir");
         std::fs::create_dir_all(root.join("sessions/other/ses_elsewhere"))
             .expect("other session dir");
         let index = concat!(

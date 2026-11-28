@@ -245,8 +245,63 @@ public enum Providers {
         return ["--model", model]
     }
 
+    /// agy's `--dangerously-skip-permissions`, which auto-approves every tool request.
+    /// (`--mode auto` is the agent's own execution mode, not a prompt bypass.)
+    static func antigravityPermArgs(_ skip: Bool) -> [String] {
+        skip ? ["--dangerously-skip-permissions"] : []
+    }
+
+    /// agy's `--agent <name>`, naming an agent from the user's own config — select,
+    /// not append, like opencode's and kimi's flag. Only used on START: agy documents
+    /// no combination of `--agent` with `--conversation`.
+    static func antigravityPresetArgs(_ preset: Preset?) -> [String] {
+        guard let name = preset?.name, !name.isEmpty else { return [] }
+        return ["--agent", name]
+    }
+
+    public static let antigravity = ProviderSpec(
+        id: .antigravity,
+        label: "Antigravity",
+        pinsSessionId: false,
+        // agy has no flag to pin an id (`--conversation` RESUMES one), so a fresh
+        // session starts clean. Nothing reads agy's store yet, so the id is not
+        // discovered and a restart cannot resume by id.
+        startArgs: { _, opts in
+            antigravityPermArgs(opts.skipPermissions)
+                + antigravityModelArgs(opts.model)
+                + antigravityPresetArgs(opts.preset)
+        },
+        resumeArgs: { cliSessionId, opts in
+            ["--conversation", cliSessionId]
+                + antigravityPermArgs(opts.skipPermissions)
+                + antigravityModelArgs(opts.model)
+        }
+    )
+
+    /// agy takes `--model <name>` like the others, forwarded as given and validated
+    /// by the CLI (`agy models` lists them).
+    static func antigravityModelArgs(_ model: String?) -> [String] {
+        guard let model, !model.isEmpty else { return [] }
+        return ["--model", model]
+    }
+
+    // Cursor owns its session IDs and rules; no preset or config is injected.
+    static func cursorArgs(_ opts: SpawnOptions) -> [String] {
+        (opts.skipPermissions ? ["--force", "--sandbox", "disabled"] : [])
+            + antigravityModelArgs(opts.model)
+    }
+
+    public static let cursor = ProviderSpec(
+        id: .cursor,
+        label: "Cursor",
+        pinsSessionId: false,
+        startArgs: { _, opts in cursorArgs(opts) },
+        resumeArgs: { id, opts in ["--resume", id] + cursorArgs(opts) }
+    )
+
     public static let all: [ProviderId: ProviderSpec] =
-        [.claude: claude, .codex: codex, .opencode: opencode, .kimi: kimi]
+        [.claude: claude, .codex: codex, .opencode: opencode, .kimi: kimi,
+         .antigravity: antigravity, .cursor: cursor]
 
     public static func spec(for id: ProviderId) -> ProviderSpec {
         switch id {
@@ -254,6 +309,8 @@ public enum Providers {
         case .codex: return codex
         case .opencode: return opencode
         case .kimi: return kimi
+        case .antigravity: return antigravity
+        case .cursor: return cursor
         }
     }
 }
@@ -477,7 +534,7 @@ public func resolveEditorCommand(_ raw: String = editorCommandString()) -> (exec
 }
 
 /// Default resolver honouring `JUANCODE_CLAUDE_BIN` / `JUANCODE_CODEX_BIN` /
-/// `JUANCODE_OPENCODE_BIN` / `JUANCODE_KIMI_BIN`.
+/// `JUANCODE_OPENCODE_BIN` / `JUANCODE_KIMI_BIN` / `JUANCODE_ANTIGRAVITY_BIN`.
 public struct DefaultBinaryResolver: BinaryResolver {
     public init() {}
 
@@ -489,6 +546,8 @@ public struct DefaultBinaryResolver: BinaryResolver {
         case .codex: return ("codex", env["JUANCODE_CODEX_BIN"])
         case .opencode: return ("opencode", env["JUANCODE_OPENCODE_BIN"])
         case .kimi: return ("kimi", env["JUANCODE_KIMI_BIN"])
+        case .antigravity: return ("agy", env["JUANCODE_ANTIGRAVITY_BIN"])
+        case .cursor: return ("cursor-agent", env["JUANCODE_CURSOR_BIN"])
         }
     }
 

@@ -187,18 +187,7 @@ pub fn create_on_branch(
     }
     let dir = dir.to_string_lossy().to_string();
 
-    // A PR branch pushed by somebody else may not exist locally at all. Best-effort:
-    // being offline must not stop the worktree being made, since the detached fallback
-    // still has whatever remote-tracking ref is already here.
-    let local = format!("refs/heads/{branch}");
-    let have_local = git(repo_cwd, &["rev-parse", "--verify", "--quiet", &local])
-        .is_some_and(|out| !out.trim().is_empty());
-    if !have_local {
-        let _ = Command::new("git")
-            .args(["fetch", "origin", branch])
-            .current_dir(repo_cwd)
-            .output();
-    }
+    let have_local = fetch_if_missing(repo_cwd, branch);
 
     if have_local && worktree_add(repo_cwd, &["worktree", "add", &dir, branch]) {
         link_node_modules(&root, &dir);
@@ -234,6 +223,25 @@ pub fn create_on_branch(
     Err(WorktreeError(format!(
         "Couldn't create a worktree for branch {branch}."
     )))
+}
+
+/// Whether `branch` is local; when it is not, `git fetch origin <branch>` so a
+/// checkout can track it.
+///
+/// A PR branch pushed by somebody else may not exist locally at all. Best-effort:
+/// being offline must not stop the worktree being made, since the detached fallback
+/// still has whatever remote-tracking ref is already here.
+pub fn fetch_if_missing(repo_cwd: &str, branch: &str) -> bool {
+    let local = format!("refs/heads/{branch}");
+    let have_local = git(repo_cwd, &["rev-parse", "--verify", "--quiet", &local])
+        .is_some_and(|out| !out.trim().is_empty());
+    if !have_local {
+        let _ = Command::new("git")
+            .args(["fetch", "origin", branch])
+            .current_dir(repo_cwd)
+            .output();
+    }
+    have_local
 }
 
 fn worktree_add(repo_cwd: &str, args: &[&str]) -> bool {
@@ -752,7 +760,11 @@ const MAX_SCAN_DEPTH: usize = 2;
 /// failure to link one path is not a failure to isolate.
 pub fn link_node_modules(source_root: &str, worktree_path: &str) -> Vec<String> {
     let mut linked = Vec::new();
-    for rel in node_modules_paths(source_root) {
+    let paths = node_modules_paths(source_root);
+    if !paths.is_empty() {
+        exclude_node_modules_links(worktree_path);
+    }
+    for rel in paths {
         let source = Path::new(source_root).join(&rel);
         let dest = Path::new(worktree_path).join(&rel);
         let Some(parent) = dest.parent() else {
@@ -771,6 +783,31 @@ pub fn link_node_modules(source_root: &str, worktree_path: &str) -> Vec<String> 
         }
     }
     linked
+}
+
+/// A `.gitignore` `node_modules/` matches only directories, so the links above showed
+/// as untracked. Every slot then read as dirty: the pool never reclaimed or parked
+/// one and cut a new slot per session instead. The bare pattern, in the repo's
+/// shared `info/exclude`, covers links and directories in every worktree.
+fn exclude_node_modules_links(worktree_path: &str) {
+    let Some(common) = git(
+        worktree_path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) else {
+        return;
+    };
+    let exclude = Path::new(common.trim()).join("info").join("exclude");
+    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if current.lines().any(|l| l.trim() == "node_modules") {
+        return;
+    }
+    let _ = std::fs::create_dir_all(exclude.parent().unwrap_or(Path::new(".")));
+    let sep = if current.is_empty() || current.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::write(&exclude, format!("{current}{sep}node_modules\n"));
 }
 
 /// Repo-relative paths of the `node_modules` directories under `root`, to
@@ -1240,6 +1277,10 @@ mod tests {
             .join("apps/oracle-mcp/node_modules")
             .symlink_metadata()
             .is_ok());
+        // A link that shows as untracked makes the slot dirty, and the pool never
+        // parks or reclaims a dirty slot.
+        let status = git(&made.path, &["status", "--porcelain"]).unwrap();
+        assert!(status.trim().is_empty(), "{status}");
         std::fs::remove_dir_all(&parent).ok();
     }
 }

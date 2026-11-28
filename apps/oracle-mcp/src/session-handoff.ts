@@ -2,7 +2,7 @@
 // the token spend: a session at 400k+ context re-reads all of it on every turn, so
 // past ~250k the cheaper way on is a new session seeded with a short note.
 //
-// The flow, never automatic — a person (or the Oracle, asked by one) starts it:
+// The flow, started manually or by the sidecar context-pressure controller:
 //
 //   1. Queue the note request into the session through the ordinary queue, so it lands
 //      on the next idle and never types over a draft.
@@ -54,15 +54,26 @@ export const DEFAULT_HANDOFF_TIMEOUT_MS = 15 * 60_000;
  *  the handoff gives up. More than one, because the transcript can trail the idle edge. */
 const MISSING_NOTE_READINGS = 3;
 
+/** Where the agent reports its note is written: this sidecar's own port. */
+export function handoffReadyUrl(sessionId: string): string {
+  const port = process.env.ORACLE_MCP_PORT ?? "4281";
+  return `http://127.0.0.1:${port}/api/sessions/${encodeURIComponent(sessionId)}/handoff/ready`;
+}
+
 /** The note request, queued into the old session. One line, so it arrives as one
- *  message however the queue delivers it. */
-export function handoffRequestPrompt(): string {
+ *  message however the queue delivers it. It ends with the agent signalling the note
+ *  itself, so the handoff no longer depends on the sidecar still waiting when the
+ *  queued request finally lands. */
+export function handoffRequestPrompt(sessionId: string): string {
   return (
     "Context handoff: this session is being replaced by a fresh one so the long context " +
     "stops being re-read every turn. Do not continue the task. Reply with a handoff note " +
     `of at most ${HANDOFF_MAX_LINES} lines between a line ${HANDOFF_BEGIN} and a line ` +
     `${HANDOFF_END}, covering: the goal; the current state (done, in progress, uncommitted); ` +
-    "the exact next step; key file:line locations; open beads ids. Then stop."
+    "the exact next step; key file:line locations; open beads ids; user constraints and " +
+    "permissions; validation already run and any live processes. After writing the note, " +
+    `run \`curl -s -X POST ${handoffReadyUrl(sessionId)}\` so juancode starts your successor, ` +
+    "then stop."
   );
 }
 
@@ -157,6 +168,9 @@ export class HandoffRefused extends Error {}
 
 const inFlight = new Map<string, Promise<HandoffOutcome>>();
 
+/** Handoffs waiting for their note, keyed by session: the agent's ready signal wakes them. */
+const readySignals = new Map<string, () => void>();
+
 /** Hand `ref` off to a fresh session. A second request for a session already handing
  *  off joins the first rather than queueing a second note request. */
 export async function handOffSession(
@@ -197,7 +211,56 @@ async function runHandoff(
   }
 
   const note = await requestNote(source, deps, opts);
+  return completeHandoff(source, note, deps);
+}
 
+/** The agent says its note is written (it ran the curl from the request). Wakes the
+ *  handoff waiting for it, or — when that one already gave up (timeout, sidecar
+ *  restart, a false "no note") — finishes the handoff from the transcript itself, so a
+ *  late note never leaves the session stopped with nobody to take over. */
+export async function handoffReady(
+  ref: string,
+  deps: HandoffDeps = defaultHandoffDeps(),
+): Promise<HandoffOutcome | "signalled"> {
+  const source = await deps.source(ref);
+  if (!source) throw new HandoffRefused(`No session "${ref}".`);
+  const signal = readySignals.get(source.id);
+  if (signal) {
+    signal();
+    return "signalled";
+  }
+  const running = inFlight.get(source.id);
+  if (running) return running;
+  if (source.status !== "running") {
+    throw new HandoffRefused(`"${source.title}" is not running; it was already handed off.`);
+  }
+  const attempt = (async () => {
+    const messages = await deps.messages(source.id);
+    // Only a note written after the request counts; an older one is a past handoff.
+    let i = messages.length;
+    while (--i >= 0) {
+      const m = messages[i]!;
+      if (m.role === "user" && m.text.includes(HANDOFF_BEGIN)) break;
+    }
+    const note = i >= 0 ? latestNote(messages.slice(i + 1)) : null;
+    if (!note) {
+      throw new HandoffRefused(
+        `No handoff note between ${HANDOFF_BEGIN} and ${HANDOFF_END} after the request; nothing was handed off.`,
+      );
+    }
+    return completeHandoff(source, note, deps);
+  })().finally(() => inFlight.delete(source.id));
+  inFlight.set(source.id, attempt);
+  return attempt;
+}
+
+/** Spawn the successor, record the handoff, sleep the old session. */
+async function completeHandoff(
+  source: HandoffSource,
+  note: string,
+  deps: HandoffDeps,
+): Promise<HandoffOutcome> {
+  const name = `"${source.title}"`;
   const newId = deps.newId ?? randomUUID;
   const chainSlug = await chainFor(source, deps, newId);
 
@@ -277,28 +340,33 @@ async function requestNote(
   });
   const onAbort = () => wake?.();
   opts.signal?.addEventListener("abort", onAbort);
+  let ready = false;
+  readySignals.set(source.id, () => {
+    ready = true;
+    wake?.();
+  });
 
   try {
-    await deps.queue(source.id, handoffRequestPrompt());
+    await deps.queue(source.id, handoffRequestPrompt(source.id));
     let missing = 0;
     for (;;) {
       const state = deps.activity(source.id);
-      if (state === "waiting_input") {
+      if (state === "waiting_input" && !ready) {
         throw new HandoffRefused(
           `${name} stopped to ask for input instead of writing its note. Answer it, then ` +
             "hand off again (a request still in its queue goes out on the next idle).",
         );
       }
-      if (state === "idle") {
+      if (ready || state === "idle") {
         const after = (await deps.messages(source.id).catch(() => [])).filter(
           (m) => m.seq > baseline,
         );
         const note = latestNote(after);
         if (note) return note;
-        // Only a reply to the request can be missing its note: an idle before the
-        // queue delivered it is the previous turn ending.
-        const delivered = after.some((m) => m.role === "user" && m.text.includes(HANDOFF_BEGIN));
-        if (delivered && ++missing >= MISSING_NOTE_READINGS) {
+        // Refuse only once the agent said its note is written: an idle reading alone
+        // misfired on sessions whose note was still coming. Without the signal (an agent
+        // that cannot reach localhost) the wait runs to the timeout instead.
+        if (ready && ++missing >= MISSING_NOTE_READINGS) {
           throw new HandoffRefused(
             `${name} answered without a handoff note between ${HANDOFF_BEGIN} and ${HANDOFF_END}; nothing was handed off.`,
           );
@@ -321,6 +389,7 @@ async function requestNote(
       wake = null;
     }
   } finally {
+    readySignals.delete(source.id);
     unsubscribe();
     opts.signal?.removeEventListener("abort", onAbort);
   }

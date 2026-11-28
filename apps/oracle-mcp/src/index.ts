@@ -51,6 +51,7 @@ import {
   UnservedRead,
 } from "./session-reads.ts";
 import { dispatch, DispatchConflictError } from "./dispatch.ts";
+import { DISPATCH_PROVIDERS, isDispatchProvider } from "./dispatch-model.ts";
 import { resolveDispatchOrigin } from "./dispatch-origin.ts";
 import { getDispatchStatus, listDispatchStatuses, parseSessionStates } from "./dispatch-status.ts";
 import { waitForDispatch } from "./dispatch-wait.ts";
@@ -80,7 +81,8 @@ import {
   supportsHeavyQueue,
 } from "./native-events.ts";
 import { getExcerpt, searchWithRefresh } from "./transcript-index.ts";
-import { watchChains } from "./chains.ts";
+import { defaultChainDeps, watchChains } from "./chains.ts";
+import { chainNotesFor, postChainNote } from "./chain-notes.ts";
 import {
   registerNotificationTools,
   notificationSubscriber,
@@ -92,7 +94,13 @@ import { readDispatchResults, startDispatchResultsWatcher } from "./dispatch-res
 import { onSessionExit, onNativeConnection } from "./native-events.ts";
 import { registerAttentionTools } from "./attention-tools.ts";
 import { registerChainTools } from "./chain-tools.ts";
-import { HandoffRefused, handOffSession, handoffSummary } from "./session-handoff.ts";
+import { startAutoHandoff } from "./auto-handoff.ts";
+import {
+  HandoffRefused,
+  handoffReady,
+  handOffSession,
+  handoffSummary,
+} from "./session-handoff.ts";
 import { fail, ok, tool } from "./tool-result.ts";
 import { notifyOracleText, startDispatchResultRelay, startTelegramBridge } from "./telegram.ts";
 
@@ -165,11 +173,9 @@ function buildServer(): McpServer {
         project: z.string().min(1).describe("Absolute path of the target project / work dir"),
         prompt: z.string().min(1).describe("The seed instruction sent to the agent"),
         provider: z
-          .enum(["claude", "codex", "opencode", "kimi"])
+          .enum(DISPATCH_PROVIDERS)
           .optional()
-          .describe(
-            "Optional provider pin; omitted, routing may choose Claude or Codex by task",
-          ),
+          .describe("Optional provider pin; omitted, routing may choose Claude or Codex by task"),
         model: z
           .string()
           .trim()
@@ -343,7 +349,7 @@ function buildServer(): McpServer {
     {
       title: "Hand a session off to a fresh one",
       description:
-        "Replace a long-context session with a fresh one so its context stops being re-read every turn. Queues a request for a short handoff note (never typed over a draft), waits for the reply, spawns a successor in the same checkout with the same provider, model and permission mode whose first prompt is the note, records the handoff in the session's chain, and puts the old session to sleep (resumable, not killed). Refuses, changing nothing, when the session is not running, waits for input, or replies without a note. Only on a human's request — never on your own initiative. Blocks until done (up to timeoutSeconds).",
+        "Replace a long-context session with a fresh one so its context stops being re-read every turn. Queues a request for a short handoff note (never typed over a draft), waits for the reply, spawns a successor in the same checkout with the same provider, model and permission mode whose first prompt is the note, records the handoff in the session's chain, and puts the old session to sleep (resumable, not killed). Refuses, changing nothing, when the session is not running, waits for input, or replies without a note. For manual requests; automatic context rotation is managed by the sidecar, not by an agent calling this tool on itself. Blocks until done (up to timeoutSeconds).",
       inputSchema: {
         sessionId: z
           .string()
@@ -761,6 +767,21 @@ app.post("/api/sessions/:id/handoff", async (req: Request, res: Response) => {
   }
 });
 
+// The agent's own "my handoff note is written" (the curl in the note request). Wakes
+// the handoff waiting for it, or finishes one whose waiter already gave up.
+app.post("/api/sessions/:id/handoff/ready", async (req: Request, res: Response) => {
+  try {
+    const outcome = await handoffReady(String(req.params.id));
+    res.json(outcome === "signalled" ? { ok: true } : { ok: true, ...outcome });
+  } catch (e) {
+    if (e instanceof HandoffRefused) {
+      res.status(409).json({ ok: false, error: e.message });
+      return;
+    }
+    sendErr(res, e);
+  }
+});
+
 // ── Heavy queue ──────────────────────────────────────────────────────────────
 // The phone's view of the global `heavy` slot queue. The core owns the registry and
 // pushes the whole queue, so the first GET subscribes and later ones read the frame
@@ -823,6 +844,43 @@ app.post("/api/heavy/cancel", (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// Chain notes: agents post progress and read the user's requests (chain-notes.ts).
+app.post("/api/chain-notes", async (req: Request, res: Response) => {
+  const { chain, fromSessionId, text, kind, asHuman } = req.body ?? {};
+  if (
+    typeof text !== "string" ||
+    (chain !== undefined && typeof chain !== "string") ||
+    (fromSessionId !== undefined && typeof fromSessionId !== "string") ||
+    (kind !== undefined && kind !== "note" && kind !== "summary")
+  ) {
+    res.status(400).json({ ok: false, error: "text (string) is required; kind is note|summary" });
+    return;
+  }
+  try {
+    const { chain: c, note } = await postChainNote(defaultChainDeps(), {
+      chain,
+      fromSessionId,
+      text,
+      kind,
+      asHuman: asHuman === true,
+    });
+    res.json({ ok: true, chain: c.id ?? c.slug, note });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/chain-notes", async (req: Request, res: Response) => {
+  const chain = typeof req.query.chain === "string" ? req.query.chain : undefined;
+  const fromSessionId =
+    typeof req.query.fromSessionId === "string" ? req.query.fromSessionId : undefined;
+  try {
+    res.type("text/plain").send(await chainNotesFor(defaultChainDeps(), { chain, fromSessionId }));
+  } catch (err) {
+    res.status(400).type("text/plain").send(err instanceof Error ? err.message : String(err));
+  }
+});
+
 app.post("/api/dispatch", async (req: Request, res: Response) => {
   try {
     const {
@@ -846,7 +904,7 @@ app.post("/api/dispatch", async (req: Request, res: Response) => {
     if (
       (model !== undefined && (typeof model !== "string" || !model.trim())) ||
       (complexity !== undefined && !["simple", "standard", "complex"].includes(complexity)) ||
-      (provider !== undefined && !["claude", "codex", "opencode", "kimi"].includes(provider)) ||
+      (provider !== undefined && !isDispatchProvider(provider)) ||
       (subscribe !== undefined && typeof subscribe !== "boolean")
     ) {
       res.status(400).send("Invalid provider, model, complexity, or subscribe");
@@ -1331,6 +1389,7 @@ app.listen(port, host, () => {
   console.log(`oracle-mcp listening on http://${host}:${port}/mcp`);
   // Watch the native backend over WS and fan session activity out to subscribers
   // (the Telegram bridge). Owns the single long-lived client socket.
+  startAutoHandoff();
   const notifications = sessionNotifications();
   const report = (error: unknown) => console.warn("session notifications:", error);
   onSessionEvent((event) => {

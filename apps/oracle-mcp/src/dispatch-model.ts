@@ -1,6 +1,20 @@
 // Local routing: no classifier API call and no changes to the CLI's environment.
 export type TaskComplexity = "simple" | "standard" | "complex";
-export type DispatchProvider = "claude" | "codex" | "opencode" | "kimi";
+/** Every provider a dispatch can pin: the one list the schemas, validation and
+ * pickers share. */
+export const DISPATCH_PROVIDERS = [
+  "claude",
+  "codex",
+  "opencode",
+  "kimi",
+  "antigravity",
+  "cursor",
+] as const;
+export type DispatchProvider = (typeof DISPATCH_PROVIDERS)[number];
+
+export function isDispatchProvider(v: unknown): v is DispatchProvider {
+  return (DISPATCH_PROVIDERS as readonly unknown[]).includes(v);
+}
 export interface ModelSelection {
   provider: DispatchProvider;
   model: string | null;
@@ -17,22 +31,20 @@ export interface ModelRequest {
 }
 
 const MODELS = {
-  claude: { simple: "haiku", standard: "sonnet", complex: "opus" },
+  claude: { simple: "sonnet", standard: "opus", complex: "opus" },
   codex: { simple: "gpt-6-luna", standard: "gpt-6.1-sol", complex: "gpt-6-astra" },
 };
 
 /** The models of the CLIs we don't pin per complexity. Just as opencode — which has
- * so many models a fixed routing table would be wrong — kimi's aliases are opaque
- * and change too fast to pin here, so a dispatch to kimi runs the CLI's own default
- * unless an explicit model (or a `JUANCODE_DISPATCH_KIMI_*_MODEL` knob) was given.
+ * so many models a fixed routing table would be wrong — kimi's and antigravity's
+ * aliases are opaque and change too fast to pin here, so a dispatch to either runs the
+ * CLI's own default unless an explicit model (or a
+ * `JUANCODE_DISPATCH_<PROVIDER>_*_MODEL` knob) was given.
  * Everything is configurable through env, so the table's opinion is a starting
  * point, not a mandate. */
-function routingModel(
-  provider: DispatchProvider,
-  complexity: TaskComplexity,
-): string | null {
-  if (provider === "opencode" || provider === "kimi") return null;
-  return MODELS[provider][complexity];
+function routingModel(provider: DispatchProvider, complexity: TaskComplexity): string | null {
+  if (provider === "claude" || provider === "codex") return MODELS[provider][complexity];
+  return null;
 }
 
 /** Only clearly bounded chores get the small model. Unknown/ticket-only requests
@@ -80,8 +92,7 @@ export function selectDispatchModel(
   const configured =
     env[`JUANCODE_DISPATCH_${provider.toUpperCase()}_${complexity.toUpperCase()}_MODEL`]?.trim();
   const routed = routingModel(provider, complexity);
-  const model =
-    configured === "default" ? null : configured || routed;
+  const model = configured === "default" ? null : configured || routed;
   return {
     provider,
     model,

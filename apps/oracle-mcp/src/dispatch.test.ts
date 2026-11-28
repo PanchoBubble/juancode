@@ -256,7 +256,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
       {
         project: "/abs/repo",
         prompt: "later",
-        model: "sonnet",
+        model: "opus",
         provider: "claude",
         worktree: false,
         dispatchId: out.dispatchId,
@@ -299,7 +299,7 @@ describe("dispatch (WS-first with mailbox fallback)", () => {
     expect(lines[0]).toEqual({
       project: "/abs/repo",
       prompt: "later",
-      model: "sonnet",
+      model: "opus",
       provider: "claude",
       worktree: true,
       dispatchId: out.dispatchId,

@@ -110,6 +110,8 @@ before(() => {
     mergedOld: add("merged-old", "merged-old"),
     // 9. ignored build output only          -> removable (git ignores it)
     buildOnlyOld: add("build-only-old", "build-only-old"),
+    // 10. commits pushed under another name (a release branch) -> not unpushed
+    releasedOld: add("released-old", "released-old"),
   };
 
   writeFileSync(join(trees.dirtyOld, "README"), "edited by an agent, never committed\n");
@@ -128,6 +130,12 @@ before(() => {
   g(trees.mergedOld, "add", "-A");
   g(trees.mergedOld, "commit", "-qm", "shipped work");
   g(trees.mergedOld, "push", "-q", "origin", "merged-old:main");
+  g(main, "fetch", "-q", "origin");
+
+  writeFileSync(join(trees.releasedOld, "released.txt"), "landed on release\n");
+  g(trees.releasedOld, "add", "-A");
+  g(trees.releasedOld, "commit", "-qm", "released work");
+  g(trees.releasedOld, "push", "-q", "origin", "released-old:release");
   g(main, "fetch", "-q", "origin");
 
   mkdirSync(join(trees.buildOnlyOld, "build"), { recursive: true });
@@ -193,6 +201,21 @@ describe("worktree sweeper classifier", () => {
     const v = verdictFor(trees.pushedOld);
     assert.equal(v.verdict, "keep");
     assert.equal(v.code, "UNMERGED");
+  });
+
+  test("commits on some other remote branch are unmerged, not unpushed", () => {
+    const v = verdictFor(trees.releasedOld);
+    assert.equal(v.code, "UNMERGED", v.reason);
+  });
+
+  test("ahead is measured against the remote's default branch, not main", () => {
+    g(main, "remote", "set-head", "origin", "release");
+    try {
+      const v = verdictFor(trees.releasedOld);
+      assert.equal(v.verdict, "remove", v.reason);
+    } finally {
+      g(main, "remote", "set-head", "origin", "main");
+    }
   });
 
   test("an open PR is kept even when the tree is old and clean", () => {

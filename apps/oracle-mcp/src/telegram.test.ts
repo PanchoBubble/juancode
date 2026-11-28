@@ -688,6 +688,22 @@ describe("notifySessionEvent", () => {
     );
   });
 
+  it("carries the agent's last reply in a finished ping, clipped", async () => {
+    const deps = makeDeps({
+      observers: observers([100]),
+      lastReply: vi.fn(async () => "Shipped the campaigns store. " + "x".repeat(2000)),
+    });
+    await notifySessionEvent(
+      { sessionId: "aaaa-1111", state: "idle", notify: true },
+      deps,
+      newBridgeState(),
+    );
+    const text = (deps.send as ReturnType<typeof vi.fn>).mock.calls[0]![1] as string;
+    expect(text).toContain("finished its turn\n\nShipped the campaigns store. x");
+    expect(text).toContain("…\n\n↩️");
+    expect(text.length).toBeLessThan(1700);
+  });
+
   it("omits the badge when there is no rollup, and never badges needs-input", async () => {
     const deps = makeDeps({ observers: observers([100]) });
     const state = newBridgeState();

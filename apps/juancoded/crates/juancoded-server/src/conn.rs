@@ -1086,17 +1086,23 @@ fn handle_client_message(
                 preset: preset.filter(|p| !p.is_empty()),
                 isolate_worktree: isolate_worktree.unwrap_or(false),
                 worktree_name: worktree_name.filter(|n| !n.is_empty()),
+                checkout_branch: None,
                 dispatch_id,
                 owner: client,
             };
             match sessions.create(req) {
-                Ok(meta) => {
+                Ok(mut meta) => {
                     let id = meta.id.clone();
                     // Before `created` goes out, so the chain frame the asker is sent
                     // behind it already lists the session it was just told about.
                     if let Some(chains) = chains {
                         if meta.dispatch_id.is_some() || from_session_id.is_some() {
                             chains.chain_dispatch(&id, from_session_id.as_deref());
+                        }
+                    }
+                    if let Some(from) = from_session_id.as_deref() {
+                        if sessions.set_parent_session(&id, from) {
+                            meta.parent_session_id = Some(from.to_string());
                         }
                     }
                     attached.insert(id.clone());
@@ -2641,6 +2647,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: false,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             })
@@ -2839,6 +2846,7 @@ mod tests {
                     preset: None,
                     isolate_worktree: false,
                     worktree_name: None,
+                    checkout_branch: None,
                     dispatch_id: None,
                     owner: 1,
                 })
@@ -4133,6 +4141,17 @@ mod tests {
 
         let sent = wire.step(dispatch(Some(oracle.clone())), &mut fanout);
         let child = created_id(&sent);
+        // The dispatcher is recorded on the child, on the wire and in the registry.
+        assert!(sent
+            .iter()
+            .any(|f| matches!(f, ServerMessage::Created { session }
+            if session.parent_session_id.as_deref() == Some(oracle.as_str()))));
+        assert_eq!(
+            wire.sessions()
+                .meta(&child)
+                .and_then(|m| m.parent_session_id),
+            Some(oracle.clone())
+        );
         assert_eq!(
             chain_book(&wire)
                 .chain_of(ChainMemberKind::Session, &child)
@@ -4218,6 +4237,10 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no created in {sent:?}"));
             ids.push(session.id.clone());
+            assert_eq!(
+                session.parent_session_id, None,
+                "an unknown source is not a parent"
+            );
             let chains = chain_book(&wire);
             let slug = chains
                 .chain_of(ChainMemberKind::Session, &session.id)

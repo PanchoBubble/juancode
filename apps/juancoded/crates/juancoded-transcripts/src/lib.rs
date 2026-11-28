@@ -17,18 +17,18 @@
 //!    worth. Every source carries an opaque durable cursor ([`Cursor`]) and reads
 //!    only what appeared after it; see [`tail`] for the ways a file can move under a
 //!    cursor and what each one does.
-//! 3. **Typed, not transcribed.** Only the eight events in [`TranscriptEvent`] cross
+//! 3. **Typed, not transcribed.** Only the typed events in [`TranscriptEvent`] cross
 //!    the seam. A field in a CLI's own format that does not map onto one of them is
 //!    skipped, not modelled, because the seam's job is to be the same shape whichever
 //!    CLI is behind it.
 //!
 //! The provider trait is [`TranscriptSource`]: bind a session to a locator, then read
-//! forward from a cursor. Two implement it, [`claude::ClaudeJsonl`] and
-//! [`opencode::OpencodeSqlite`]. A third for codex fits without changing anything
-//! here, which is the point of the trait, but codex is not installed on the machine
-//! this was written on and none of it is invented.
+//! forward from a cursor. The sources are [`claude::ClaudeJsonl`] and
+//! [`opencode::OpencodeSqlite`] and [`codex::CodexJsonl`]. Codex reports usage
+//! snapshots from its rollout files.
 
 pub mod claude;
+pub mod codex;
 pub mod cursors;
 pub mod opencode;
 pub mod tail;
@@ -52,6 +52,7 @@ pub const MAX_TEXT: usize = 16 * 1024;
 #[serde(rename_all = "kebab-case")]
 pub enum Source {
     ClaudeJsonl,
+    CodexJsonl,
     OpencodeSqlite,
 }
 
@@ -59,6 +60,7 @@ impl Source {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeJsonl => "claude-jsonl",
+            Self::CodexJsonl => "codex-jsonl",
             Self::OpencodeSqlite => "opencode-sqlite",
         }
     }
@@ -81,7 +83,7 @@ impl TokenUsage {
     }
 }
 
-/// The eight things the seam carries.
+/// The events the seam carries.
 ///
 /// This list is the contract, and it is short on purpose: a consumer written against
 /// it must not have to know which CLI produced the record. `step` is the CLI's own
@@ -114,6 +116,13 @@ pub enum TranscriptEvent {
         ok: bool,
         output: String,
     },
+    /// Provider-reported cumulative usage and current context occupancy.
+    UsageSnapshot {
+        usage: TokenUsage,
+        context_tokens: u64,
+        context_window: Option<u64>,
+        model: Option<String>,
+    },
     /// What a step cost.
     Usage {
         step: Option<String>,
@@ -133,6 +142,7 @@ impl TranscriptEvent {
             Self::ToolCall { .. } => "toolCall",
             Self::ToolResult { .. } => "toolResult",
             Self::Usage { .. } => "usage",
+            Self::UsageSnapshot { .. } => "usageSnapshot",
         }
     }
 }
@@ -175,6 +185,7 @@ pub struct TranscriptRecord {
 #[serde(tag = "source", rename_all = "kebab-case")]
 pub enum Binding {
     ClaudeJsonl { path: PathBuf },
+    CodexJsonl { path: PathBuf },
     OpencodeSqlite { db: PathBuf, conversation: String },
 }
 
@@ -182,6 +193,7 @@ impl Binding {
     pub fn source(&self) -> Source {
         match self {
             Self::ClaudeJsonl { .. } => Source::ClaudeJsonl,
+            Self::CodexJsonl { .. } => Source::CodexJsonl,
             Self::OpencodeSqlite { .. } => Source::OpencodeSqlite,
         }
     }
@@ -189,7 +201,9 @@ impl Binding {
     /// The stable string that names this binding in the cursor store.
     pub fn locator(&self) -> String {
         match self {
-            Self::ClaudeJsonl { path } => path.to_string_lossy().into_owned(),
+            Self::ClaudeJsonl { path } | Self::CodexJsonl { path } => {
+                path.to_string_lossy().into_owned()
+            }
             Self::OpencodeSqlite { db, conversation } => {
                 format!("{}#{conversation}", db.to_string_lossy())
             }

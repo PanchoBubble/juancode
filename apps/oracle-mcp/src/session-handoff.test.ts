@@ -8,6 +8,7 @@ import {
   HANDOFF_END,
   handOffSession,
   HandoffRefused,
+  handoffReady,
   handoffRequestPrompt,
   parseHandoffSources,
   type HandoffDeps,
@@ -41,6 +42,10 @@ function world(opts: {
   createFails?: boolean;
   /** What the transcript says the last turn ran on; `null` for a transcript that is silent. */
   transcriptModel?: string | null;
+  /** The agent runs the ready curl after replying, as the request asks. */
+  signalsReady?: boolean;
+  /** The reply only lands after this many ms (a turn that outlasts the wait). */
+  replyAfterMs?: number;
 }) {
   let state: State = opts.state ?? "idle";
   const messages: SessionMessage[] = [
@@ -88,7 +93,8 @@ function world(opts: {
             });
           }
           settle(opts.answerState ?? "idle");
-        }, 5);
+          if (opts.signalsReady) void handoffReady(SOURCE.id, deps).catch(() => {});
+        }, opts.replyAfterMs ?? 5);
       }, 5);
     },
     create: async (frame) => {
@@ -133,7 +139,8 @@ describe("extractHandoffNote", () => {
   });
 
   it("asks for a short note with the markers, on one line", () => {
-    const prompt = handoffRequestPrompt();
+    const prompt = handoffRequestPrompt("old-session");
+    expect(prompt).toContain("/api/sessions/old-session/handoff/ready");
     expect(prompt).toContain(HANDOFF_BEGIN);
     expect(prompt).toContain(HANDOFF_END);
     expect(prompt).toContain("at most 60 lines");
@@ -146,7 +153,7 @@ describe("handOffSession", () => {
     const w = world({});
     const outcome = await handOffSession("old", w.deps);
 
-    expect(w.queued).toEqual([handoffRequestPrompt()]);
+    expect(w.queued).toEqual([handoffRequestPrompt("old-session")]);
     expect(outcome.note).toBe(NOTE);
     expect(outcome.successorId).toBe("new-session");
     expect(outcome.warnings).toEqual([]);
@@ -199,8 +206,8 @@ describe("handOffSession", () => {
     expect(w.handoffs[0]!.chainSlug).toBe("auth");
   });
 
-  it("refuses, spawning nothing, when the reply has no note", async () => {
-    const w = world({ reply: "I'd rather keep going." });
+  it("refuses, spawning nothing, when the agent signals ready without a note", async () => {
+    const w = world({ reply: "I'd rather keep going.", signalsReady: true });
     await expect(handOffSession("old", w.deps)).rejects.toThrow(/without a handoff note/);
     expect(w.creates).toEqual([]);
     expect(w.handoffs).toEqual([]);
@@ -243,6 +250,33 @@ describe("handOffSession", () => {
     const w = world({ state: "busy" });
     w.deps.queue = async () => {};
     await expect(handOffSession("old", w.deps, { timeoutMs: 20 })).rejects.toThrow(/Timed out/);
+  });
+
+  it("finishes on the agent's ready signal even while activity still reads busy", async () => {
+    const w = world({ signalsReady: true, answerState: "busy" });
+    const outcome = await handOffSession("old", w.deps);
+    expect(outcome.successorId).toBe("new-session");
+    expect(w.slept).toEqual(["old-session"]);
+  });
+
+  it("a late ready signal completes a handoff whose wait already gave up", async () => {
+    const w = world({ replyAfterMs: 40 });
+    await expect(handOffSession("old", w.deps, { timeoutMs: 20 })).rejects.toThrow(/Timed out/);
+    expect(w.creates).toEqual([]);
+    await new Promise((r) => setTimeout(r, 60));
+    const outcome = await handoffReady("old", w.deps);
+    expect(outcome).not.toBe("signalled");
+    expect(w.creates).toHaveLength(1);
+    expect(w.creates[0]!.initialInput).toContain(NOTE);
+    expect(w.slept).toEqual(["old-session"]);
+  });
+
+  it("a late ready signal ignores a note from before the request", async () => {
+    const w = world({ reply: "no note here", replyAfterMs: 40 });
+    await expect(handOffSession("old", w.deps, { timeoutMs: 20 })).rejects.toThrow(/Timed out/);
+    await new Promise((r) => setTimeout(r, 60));
+    await expect(handoffReady("old", w.deps)).rejects.toThrow(/No handoff note/);
+    expect(w.creates).toEqual([]);
   });
 
   it("joins a handoff already in flight instead of asking twice", async () => {

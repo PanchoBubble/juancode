@@ -646,10 +646,28 @@ pub fn auto_fix_prompt(
     } else {
         ""
     };
+    // Matches the reasons `classify_pr_activity` writes for comments and reviews.
+    let review_feedback = reasons
+        .iter()
+        .any(|r| r.contains("new comment") || r.starts_with("New review from"));
+    let base = match stacked_on {
+        Some(base) => format!("`{base}` (by the rebase rule above)"),
+        None => "the latest base branch (merge it in, no rebase)".to_string(),
+    };
+    let review = if review_feedback {
+        format!(
+            " For review feedback: address the comments, and if you have concerns about any \
+             of them, STOP and ask me before changing anything. Once they are addressed, \
+             resolve the review threads, update the branch with {base}, push, and trigger a \
+             new review."
+        )
+    } else {
+        String::new()
+    };
     format!(
         "[juancode PR-tracker] New activity on PR #{number}: {summary}. Check the latest state \
          with `gh pr view {number}`, `gh pr checks {number}`, and `gh pr diff {number}`. If it's \
-         an obvious fix, make it, commit, and push to `{branch}`.{stack}{skill} Never merge or \
+         an obvious fix, make it, commit, and push to `{branch}`.{stack}{skill}{review} Never merge or \
          close a PR yourself. If it needs a real decision, STOP and tell me what you need."
     )
 }
@@ -1051,6 +1069,23 @@ mod tests {
         let fix = auto_fix_prompt(7, "feature", &["x".into()], None, false);
         assert!(!fix.contains("stacked"), "{fix}");
         assert!(!fix.contains("force-with-lease"), "{fix}");
+    }
+
+    /// Review feedback gets the whole loop — address, ask on concerns, resolve threads,
+    /// bring the base in, re-request review — and CI-only activity does not.
+    #[test]
+    fn review_feedback_asks_for_resolve_update_and_a_new_review() {
+        let fix = auto_fix_prompt(7, "feature", &["2 new comments from @a".into()], None, false);
+        assert!(fix.contains("STOP and ask me"), "{fix}");
+        assert!(fix.contains("resolve the review threads"), "{fix}");
+        assert!(fix.contains("latest base branch"), "{fix}");
+        assert!(fix.contains("trigger a new review"), "{fix}");
+
+        let stacked = auto_fix_prompt(7, "c", &["New review from @a".into()], Some("pr3"), false);
+        assert!(stacked.contains("with `pr3` (by the rebase rule"), "{stacked}");
+
+        let ci = auto_fix_prompt(7, "feature", &["CI checks are failing".into()], None, false);
+        assert!(!ci.contains("trigger a new review"), "{ci}");
     }
 
     /// The fallback half of webhook matching. Lowercased on the way out, because the

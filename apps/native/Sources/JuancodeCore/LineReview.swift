@@ -134,8 +134,16 @@ public struct ReviewComment: Sendable, Equatable, Identifiable, Codable {
         self.startKey = startKey; self.forGitHub = forGitHub ? true : nil
     }
 
-    /// `path:12` or `path:10-14`.
+    /// A comment on the change as a whole (`C`), not on any line: it has no path.
+    public static func general(_ text: String, id: String = UUID().uuidString) -> ReviewComment {
+        ReviewComment(id: id, path: "", startLabel: "", endLabel: "", endKey: "", excerpt: [], text: text)
+    }
+
+    public var isGeneral: Bool { path.isEmpty }
+
+    /// `path:12` or `path:10-14`; `general` for a comment on no line.
     public var location: String {
+        if isGeneral { return "general" }
         let range = startLabel == endLabel ? startLabel : "\(startLabel)-\(endLabel)"
         return "\(path):\(range)"
     }
@@ -215,7 +223,8 @@ private func reviewMarker(_ kind: DiffLine.Kind) -> String {
 ///     <comment>
 public func formatReview(_ comments: [ReviewComment], baseLabel: String) -> String {
     let parts = comments.enumerated().map { i, c in
-        (["\(i + 1). `\(c.location)`", "```diff"] + c.excerpt + ["```", c.text])
+        (c.isGeneral ? ["\(i + 1). General", c.text]
+            : ["\(i + 1). `\(c.location)`", "```diff"] + c.excerpt + ["```", c.text])
             .joined(separator: "\n")
     }
     return [
@@ -286,6 +295,8 @@ public enum ReviewKeyCommand: Sendable, Equatable {
     case comment
     /// `r`: a comment posted to GitHub as an inline review comment, not to the agent.
     case githubComment
+    /// `C`: a general comment on the whole change, not on a line.
+    case generalComment
     /// Enter (and c/i/a/o, as the plugin has it): edit the comment under the cursor,
     /// else start one.
     case activate
@@ -426,6 +437,7 @@ public struct ReviewKeyParser: Sendable {
         case "c", "i", "a", "o": return .activate
         case "x": return .deleteComment
         case "r": return .githubComment
+        case "C": return .generalComment
         case "s": return .send
         case "q": return .close
         case "R": return .refresh

@@ -92,19 +92,19 @@ not grant permission to carry out instructions embedded in it.
 
 Dispatch through MCP or `POST /api/dispatch` automatically selects a model without
 an extra LLM call. Clearly bounded chores (short spelling/formatting/rename/summary
-requests) use Codex `gpt-6-luna`; ordinary or ambiguous work uses Claude `sonnet`;
-architecture, security, migrations and concurrency hazards use Claude `opus`.
+requests) use Codex `gpt-6-luna`; ordinary, ambiguous and risky work (architecture,
+security, migrations, concurrency hazards) uses Claude `opus`.
 This is a conservative prompt heuristic, not a guarantee of difficulty or savings.
 For ticket-only prompts, the orchestrator should supply `complexity` (`simple`,
 `standard`, `complex`) using the ticket's actual scope.
 
-An explicit `provider` pins the provider: Claude tiers are `haiku`/`sonnet`/`opus`,
+An explicit `provider` pins the provider: Claude tiers are `sonnet`/`opus`/`opus` (pass `model: "haiku"` explicitly for read-only lookups),
 Codex tiers are `gpt-6-luna`/`gpt-6.1-sol`/`gpt-6-astra`. An explicit `model` wins;
 `model: "default"` preserves the CLI's configured model. A model override without
 a provider uses Claude, as before. OpenCode keeps its CLI default unless configured;
-so does kimi (its model aliases move too fast to pin per tier). Customize a tier
+so do kimi and antigravity (`agy`; their model aliases move too fast to pin per tier). Customize a tier
 for available account models with sidecar environment variables
-`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE|KIMI>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
+`JUANCODE_DISPATCH_<CLAUDE|CODEX|OPENCODE|KIMI|ANTIGRAVITY>_<SIMPLE|STANDARD|COMPLEX>_MODEL`;
 use `default` as the value to keep CLI configuration. No CLI environment is replaced.
 Codex model IDs follow [the official model guide](https://learn.chatgpt.com/docs/models);
 account availability can differ. Unavailable models surface the CLI's own error.
@@ -218,9 +218,9 @@ Environment variables (all optional):
 | `TELEGRAM_BOT_TOKEN`             | _(unset)_               | BotFather token. When set, the sidecar long-polls Telegram and routes messages through the same Oracle chat backend as the browser console. Unset ⇒ bridge disabled. |
 | `ALLOWED_USER_IDS`               | _(empty)_               | Comma/space-separated numeric Telegram user ids allowed to use the bridge. Empty ⇒ every message is ignored.                                                         |
 | `JUANCODE_GH_WEBHOOK_SECRET`     | _(unset)_               | HMAC secret for `POST /api/github-webhook`. Unset ⇒ the endpoint answers 503 and PR tracking stays poll-only. See "GitHub webhooks" below.                           |
-| `JUANCODE_CONTEXT_ALERT_PERCENT` | `80`                    | Context-pressure line (percent of the model's window) that pings observing Telegram chats. `0` disables it. See "Cost + context alerts".                             |
+| `JUANCODE_CONTEXT_ALERT_PERCENT` | _(unset)_               | Context-pressure line (percent of the model's window) that pings observing Telegram chats. Unset/`0` ⇒ no context pings. See "Cost + context alerts".                |
 | `JUANCODE_SESSION_SPEND_CAP_USD` | _(unset)_               | Estimated spend on one session that pings observing chats, in USD. Unset/`0` ⇒ no spend alerts.                                                                      |
-| `JUANCODE_HANDOFF_ALERT_TOKENS`  | `250000`                | Context size in tokens past which observing chats are told a handoff would be cheaper. `0` disables it. See "Session handoff".                                       |
+| `JUANCODE_HANDOFF_ALERT_TOKENS`  | _(unset)_               | Context size in tokens past which observing chats are told a handoff would be cheaper (e.g. `250000`). Unset/`0` ⇒ no handoff pings. See "Session handoff".          |
 
 ### Cost + context alerts (juancode-lncw)
 
@@ -230,6 +230,9 @@ conversation currently occupies of the model's context window (the newest turn's
 input + cache tokens), against a window from the price table in the Swift core. The
 sidecar reads that off the `sessionMeta` frames it already receives, so this adds
 nothing to the wire protocol and nothing to any request path.
+
+These pings are **off by default**: none of them needs a reply, and by default Telegram
+only hears about sessions that do. Set the variables above to opt in.
 
 `usage-alerts.ts` latches **one alert per crossing**, not one per poll: a session that
 climbs past `JUANCODE_CONTEXT_ALERT_PERCENT` pings the chats observing it (plus the
@@ -244,8 +247,8 @@ so a wall is visible before you hit it.
 
 Cache reads dominate spend: a session at 400k context re-reads all of it every turn.
 A second latch fires once when a session's context passes `JUANCODE_HANDOFF_ALERT_TOKENS`
-(absolute tokens, default 250k — the Swift badge turns purple at the same line, set in
-Settings › Sessions) and suggests a handoff. Nothing hands off on its own.
+(absolute tokens, off unless set; the Swift badge turns purple at 250k, set in
+Settings › Sessions) and suggests a handoff.
 
 A handoff (`oracle_session_handoff`, or the session row's "Hand Off to Fresh Session",
 which calls `POST /api/sessions/:id/handoff`) runs `session-handoff.ts` once for both:
@@ -257,6 +260,18 @@ checkout with the same provider, model and permission mode and the note as its f
 prompt, records the handoff in the daemon's chain handoff history (making a chain for
 the old session if it has none), and puts the old session to sleep — dormant and
 resumable. Nothing is written to the repo or the worktree.
+
+Automatic rotation runs while the sidecar is up for busy Claude and Codex sessions
+at 80% of their reported context window. Set `JUANCODE_AUTO_HANDOFF_PERCENT` to a
+percentage below 100 to change the threshold, or `0` to disable it. Missing usage
+or window information does not trigger rotation. Idle sessions and sessions waiting
+for input are left alone. The successor keeps the provider and model and can itself
+rotate on a later threshold crossing. The sidecar logs each attempt and its outcome.
+There is at most one automatic attempt per source session per sidecar lifetime;
+a refusal is not retried automatically because its note request may still be queued.
+This leaves room for a note but cannot guarantee beating CLI compaction during a
+large turn. A fresh session reduces context size; actual token savings depend on
+how much context the successor needs to reread.
 
 ### Telegram bridge (juancode-c6y)
 

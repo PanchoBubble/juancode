@@ -38,6 +38,8 @@ public struct ChainMember: Codable, Sendable, Equatable, Hashable {
     public var url: String?
     /// Epoch ms the item joined this chain.
     public var addedAt: Int
+    /// A beads/Linear ticket a client reported closed; the wire omits it while false.
+    public var done: Bool?
 
     public init(kind: ChainMemberKind, ref: String, title: String? = nil, url: String? = nil,
                 addedAt: Int = 0) {

@@ -11,6 +11,8 @@ pub enum ProviderId {
     Codex,
     Opencode,
     Kimi,
+    Antigravity,
+    Cursor,
 }
 
 impl ProviderId {
@@ -20,6 +22,8 @@ impl ProviderId {
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::Opencode),
             "kimi" => Some(Self::Kimi),
+            "antigravity" => Some(Self::Antigravity),
+            "cursor" => Some(Self::Cursor),
             _ => None,
         }
     }
@@ -30,6 +34,8 @@ impl ProviderId {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Kimi => "kimi",
+            Self::Antigravity => "antigravity",
+            Self::Cursor => "cursor",
         }
     }
 }
@@ -80,12 +86,14 @@ pub struct SessionUsage {
     pub cost_usd: Option<f64>,
     /// What the *live* conversation currently occupies of the model's window: the
     /// newest request's input + cache read + cache write, which is
-    /// exactly what the next one has to re-send. Distinct from the cumulative
+    /// exactly what the next one has to re-send. Codex reports its latest request
+    /// total (input + output) directly. Distinct from the cumulative
     /// `input_tokens`, which only ever grows, and it comes back down when the CLI
     /// compacts. `None` until a request lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<i64>,
-    /// The window `context_tokens` is measured against, from `crate::pricing`. `None`
+    /// The window `context_tokens` is measured against, reported by the CLI when
+    /// available (Codex), otherwise from `crate::pricing`. `None`
     /// for a model we have no window for — the percentage is then not computable, which
     /// is deliberately different from 0%.
     #[serde(default, skip_serializing_if = "Option::is_none")]

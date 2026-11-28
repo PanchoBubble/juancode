@@ -19,42 +19,32 @@ struct ChainGraphView: View {
     let query: String
 
     @AppStorage("chainGraph.zoom") private var zoom: Double = 1
+    @AppStorage("chainGraph.vertical") private var vertical = false
     @State private var selectedEdge: String?
     @State private var focusedNode: ChainGraphNodeID?
     @FocusState private var canvasFocused: Bool
 
     static let metrics = ChainGraphMetrics()
-    private static let inspectorWidth: CGFloat = 300
-    private static let wideEnough: CGFloat = 820
     private static let zoomRange: ClosedRange<Double> = 0.5...1.5
 
     var body: some View {
         let graph = ChainGraph.build(chain: chain,
                                      handoffs: model.chainHandoffs.handoffs(in: chain.slug),
-                                     links: model.chainGraphLinks(chain))
+                                     links: model.chainGraphLinks(chain),
+                                     handoffsShareRank: vertical)
         let rows = Dictionary(model.chainDetailRows(chain).map { ($0.id, $0) },
                               uniquingKeysWith: { a, _ in a })
         let names = ChainGraphNames(model: model, rows: rows)
         GeometryReader { geo in
-            let wide = geo.size.width >= Self.wideEnough
-            let canvasWidth = wide ? geo.size.width - Self.inspectorWidth - 1 : geo.size.width
+            let canvasWidth = geo.size.width
             let placement = ChainGraphPlacement.place(graph, metrics: Self.metrics,
-                                                      width: max(canvasWidth / zoom - 24, Self.metrics.card.width))
-            let layout = wide
-                ? AnyLayout(HStackLayout(spacing: 0))
-                : AnyLayout(VStackLayout(spacing: 0))
-            layout {
-                VStack(spacing: 0) {
-                    toolbar(graph, legend: canvasWidth >= 760,
-                            fit: (canvasWidth - 24) / max(placement.size.width, 1))
-                    Divider()
-                    canvas(graph, placement: placement, rows: rows, names: names)
-                }
+                                                      width: max(canvasWidth / zoom - 24, Self.metrics.card.width),
+                                                      vertical: vertical)
+            VStack(spacing: 0) {
+                toolbar(graph, legend: canvasWidth >= 760,
+                        fit: (canvasWidth - 24) / max(placement.size.width, 1))
                 Divider()
-                ChainRelationshipInspector(graph: graph, names: names, selected: $selectedEdge,
-                                           supportsHandoffs: model.supportsChainHandoffs)
-                    .frame(width: wide ? Self.inspectorWidth : nil)
-                    .frame(maxHeight: wide ? .infinity : min(geo.size.height * 0.4, 260))
+                canvas(graph, placement: placement, rows: rows, names: names)
             }
         }
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.appPanel))
@@ -115,7 +105,9 @@ struct ChainGraphView: View {
         } else {
             parts.append("Handoffs unavailable on this daemon")
         }
-        let links = edges.count - handoffs - edges.filter { if case .handoffIssue = $0.kind { return true } else { return false } }.count
+        let dispatches = edges.filter { $0.kind == .dispatched }.count
+        if dispatches > 0 { parts.append("\(dispatches) dispatch\(dispatches == 1 ? "" : "es")") }
+        let links = edges.count - handoffs - dispatches - edges.filter { if case .handoffIssue = $0.kind { return true } else { return false } }.count
         if links > 0 { parts.append("\(links) tracking link\(links == 1 ? "" : "s")") }
         if !graph.unconnected.isEmpty { parts.append("\(graph.unconnected.count) unconnected") }
         return parts.joined(separator: " · ")
@@ -289,6 +281,10 @@ struct ChainGraphNodeCard: View {
                     HStack(spacing: 4) {
                         Text(face.footer).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 4)
+                        if let pct = face.context {
+                            Text("\(pct)%").monospacedDigit().foregroundStyle(face.contextColor)
+                                .help("Context window used")
+                        }
                         if let when = face.when { Text(when).lineLimit(1) }
                     }
                     .font(.caption2)
@@ -333,6 +329,8 @@ private struct ChainGraphCardFace {
     var accent: Color = .secondary
     var footer = ""
     var when: String?
+    var context: Int?
+    var contextColor: Color = .secondary
     var help = ""
     var url: URL?
     var missing = false
@@ -384,6 +382,16 @@ private struct ChainGraphCardFace {
                 dot = meta.map { sessionDotColor(live: model.isLive($0.id), activity: model.activities[$0.id]) }
                 accent = oracle ? .purple : (dot ?? .secondary)
                 footer = oracle ? "Oracle dock" : (row?.project ?? "")
+                if let usage = meta?.usage, let pct = usage.contextPercent {
+                    context = pct
+                    let handoff = UserDefaults.standard.object(forKey: contextHandoffTokensKey) as? Int
+                        ?? ContextPressure.defaultHandoffTokens
+                    switch usage.contextPressure(handoffTokens: handoff) {
+                    case .ok: break
+                    case .critical: contextColor = .red
+                    default: contextColor = .orange
+                    }
+                }
             case .trackedPr:
                 let pr = ChainPrRef(ref.ref)
                 kicker = "Pull request" + (pr.number.map { " #\($0)" } ?? "")
@@ -457,9 +465,23 @@ struct ChainGraphRoute {
     var end: CGPoint
 
     /// `lane` separates parallel edges between the same two nodes.
-    init(from a: CGRect, to b: CGRect, lane: Int) {
+    init(from a: CGRect, to b: CGRect, lane: Int, vertical: Bool = false) {
         let bend = CGFloat(lane) * 22
-        if a == b {
+        if vertical, a != b, b.minY >= a.maxY {
+            // Down to a later rank: leave the bottom, arrive on the top.
+            start = CGPoint(x: a.midX, y: a.maxY)
+            end = CGPoint(x: b.midX, y: b.minY)
+            let dy = max((end.y - start.y) / 2, 30)
+            c1 = CGPoint(x: start.x + bend, y: start.y + dy)
+            c2 = CGPoint(x: end.x + bend, y: end.y - dy)
+        } else if vertical, a != b, a.minY >= b.maxY {
+            // Back up to an earlier rank: leave the top, arrive on the bottom.
+            start = CGPoint(x: a.midX, y: a.minY)
+            end = CGPoint(x: b.midX, y: b.maxY)
+            let dy = max((start.y - end.y) / 2, 30)
+            c1 = CGPoint(x: start.x + 26 + bend, y: start.y - dy)
+            c2 = CGPoint(x: end.x + 26 + bend, y: end.y + dy)
+        } else if a == b {
             // A self-handoff: a loop over the card's top edge.
             start = CGPoint(x: a.midX - 36, y: a.minY)
             end = CGPoint(x: a.midX + 36, y: a.minY)
@@ -501,6 +523,8 @@ struct ChainGraphRoute {
     struct Routed: Identifiable {
         let edge: ChainGraphEdge
         let route: ChainGraphRoute
+        /// Both cards sit in one handoff stack: no stroke, just a chip on the seam.
+        var stacked = false
         var id: String { edge.id }
     }
 
@@ -514,7 +538,8 @@ struct ChainGraphRoute {
             seen[pair] = n + 1
             // 0, 1, -1, 2, -2… so the first edge runs straight.
             let lane = n == 0 ? 0 : (n % 2 == 1 ? (n + 1) / 2 : -(n / 2))
-            return Routed(edge: e, route: ChainGraphRoute(from: a, to: b, lane: lane))
+            return Routed(edge: e, route: ChainGraphRoute(from: a, to: b, lane: lane, vertical: placement.vertical),
+                          stacked: a != b && a.intersects(b))
         }
     }
 }
@@ -525,12 +550,13 @@ extension ChainGraphEdge {
         case let .handoff(h): return h.isOpen ? .orange : .secondary
         case .handoffIssue: return .teal
         case .watchesPr, .tracksTicket: return .blue
+        case .dispatched: return .purple
         }
     }
 
     var dashed: Bool {
         switch kind {
-        case .handoff: return false
+        case .handoff, .dispatched: return false
         case .handoffIssue, .watchesPr, .tracksTicket: return true
         }
     }
@@ -541,6 +567,7 @@ extension ChainGraphEdge {
         case .handoffIssue: return "circle.hexagongrid"
         case .watchesPr: return "eye"
         case .tracksTicket: return "ticket"
+        case .dispatched: return "arrow.turn.down.right"
         }
     }
 }
@@ -553,7 +580,7 @@ private struct ChainGraphEdges: View {
     var body: some View {
         let routes = ChainGraphRoute.all(graph, placement)
         Canvas { ctx, _ in
-            for routed in routes {
+            for routed in routes where !routed.stacked {
                 let edge = routed.edge, route = routed.route
                 var path = Path()
                 path.move(to: route.start)
@@ -600,7 +627,7 @@ private struct ChainGraphEdgeLabels: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: edge.icon).font(.system(size: 9, weight: .semibold))
-                    Text(edge.label).lineLimit(1).truncationMode(.tail)
+                    if !routed.stacked { Text(edge.label).lineLimit(1).truncationMode(.tail) }
                 }
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(on ? Color.white : Color.primary)
@@ -611,11 +638,24 @@ private struct ChainGraphEdgeLabels: View {
                 .fixedSize()
             }
             .buttonStyle(.plain)
-            .position(route.mid)
             .help("\(edge.kind.title): \(names.title(edge.from)) → \(names.title(edge.to))\n\(edge.label)")
             .clickCursor()
             .accessibilityLabel("\(edge.kind.title) from \(names.title(edge.from)) to \(names.title(edge.to)): \(edge.label)")
             .accessibilityHint("Shows this relationship's details")
+            .popover(isPresented: Binding(get: { on }, set: { if !$0, selected == edge.id { selected = nil } }),
+                     arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    ChainRelationshipDetail(edge: edge, graph: graph, names: names, selected: $selected)
+                }
+                .padding(14)
+                .frame(width: 320, alignment: .leading)
+            }
+            // Last: `.position` fills the whole canvas, so anything after it (clickCursor's
+            // contentShape) would make each label swallow clicks meant for the cards.
+            // A stacked handoff's chip sits on the seam where the newer card starts.
+            .position(routed.stacked ? CGPoint(x: placement.nodes[edge.to]?.minX ?? route.mid.x,
+                                               y: placement.nodes[edge.to]?.minY ?? route.mid.y)
+                                     : route.mid)
         }
         .frame(width: placement.size.width, height: placement.size.height, alignment: .topLeading)
     }
@@ -647,6 +687,7 @@ private struct ChainGraphLegend: View {
         HStack(spacing: 10) {
             item(.orange, dashed: false, "Open handoff")
             item(.secondary, dashed: false, "Closed")
+            item(.purple, dashed: false, "Dispatched")
             item(.blue, dashed: true, "Tracking")
         }
         .font(.caption2)
@@ -664,105 +705,9 @@ private struct ChainGraphLegend: View {
     }
 }
 
-// MARK: - Inspector
+// MARK: - Relationship detail
 
-/// Every recorded relationship as a list — the graph's keyboard and VoiceOver
-/// alternative — and the full record of the one selected.
-private struct ChainRelationshipInspector: View {
-    @Environment(AppModel.self) private var model
-    let graph: ChainGraph
-    let names: ChainGraphNames
-    @Binding var selected: String?
-    let supportsHandoffs: Bool
-
-    var body: some View {
-        let edges = graph.edges
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(selected == nil ? "Relationships" : "Relationship")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                Spacer()
-                if selected != nil {
-                    Button("All") { selected = nil }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                        .clickCursor()
-                        .accessibilityLabel("Back to all relationships")
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let edge = edges.first(where: { $0.id == selected }) {
-                        ChainRelationshipDetail(edge: edge, graph: graph, names: names, selected: $selected)
-                    } else if edges.isEmpty {
-                        emptyState
-                    } else {
-                        ForEach(edges) { edge in
-                            Button { selected = edge.id } label: { relationshipRow(edge) }
-                                .buttonStyle(.plain)
-                                .clickCursor()
-                                .accessibilityLabel("\(edge.kind.title) from \(names.title(edge.from)) to \(names.title(edge.to)): \(edge.label)\(edge.handoff.map { ", \($0.state.title)" } ?? "")")
-                        }
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .background(Color.appBand)
-    }
-
-    @ViewBuilder private var emptyState: some View {
-        Label("No recorded relationships", systemImage: "point.3.connected.trianglepath.dotted")
-            .font(.callout.weight(.medium))
-        Text("These members are grouped only because they share this chain. Being in a chain does not mean one depends on, owns or follows another, so no connections are drawn.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-        if supportsHandoffs {
-            Text("A handoff recorded on this chain, or a PR or ticket tracked by one of its sessions, appears here as a connection.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            Label("This daemon does not record handoffs. Update juancoded to see handoff history; only tracked PR and ticket links can be shown.",
-                  systemImage: "exclamationmark.triangle")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func relationshipRow(_ edge: ChainGraphEdge) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: edge.icon)
-                .foregroundStyle(edge.tint)
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(edge.label).font(.callout).lineLimit(2)
-                Text("\(names.title(edge.from)) → \(names.title(edge.to))")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                HStack(spacing: 4) {
-                    Text(edge.kind.title)
-                    if let h = edge.handoff, case .handoff = edge.kind {
-                        Text("·")
-                        Text(h.state.title)
-                    }
-                }
-                .font(.caption2).foregroundStyle(.tertiary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.appHairline(0.05)))
-        .contentShape(Rectangle())
-    }
-}
-
+/// The full record of one relationship, shown in a popover on its edge label.
 private struct ChainRelationshipDetail: View {
     @Environment(AppModel.self) private var model
     let edge: ChainGraphEdge
@@ -810,6 +755,8 @@ private struct ChainRelationshipDetail: View {
         } else {
             Text(edge.kind == .watchesPr
                  ? "The tracked PR's watch names this session as the one working it."
+                 : edge.kind == .dispatched
+                 ? "The first session dispatched the second (its recorded parent)."
                  : "The tracked ticket names this session as the one working it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

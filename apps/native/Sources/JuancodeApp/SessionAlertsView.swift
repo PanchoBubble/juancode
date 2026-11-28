@@ -37,6 +37,10 @@ struct SessionAlertsView: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             Text(session.title).foregroundStyle(.secondary).lineLimit(2)
+            Toggle("Keep alive (never auto-sleep, so alerts aren't missed)", isOn: Binding(
+                get: { model.isKeptAlive(session.id) },
+                set: { if $0 != model.isKeptAlive(session.id) { model.toggleKeepAlive(session.id) } }
+            ))
             if !loaded {
                 Text(loadError ?? "Loading subscriptions…").foregroundStyle(.secondary)
             } else {

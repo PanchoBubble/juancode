@@ -354,11 +354,13 @@ pub fn region_contains(region: &str, signature: &str) -> bool {
     normalize(region).contains(&sig)
 }
 
-/// Claude collapses a large or multi-line bracketed paste into a chip
-/// (`[Pasted text #1 +29 lines]`) instead of echoing the text, so the signature never
-/// appears even though the paste is sitting in the box. That chip is a landing.
+/// Claude (`[Pasted text #1 +29 lines]`) and Codex (`[Pasted Content 1452 chars]`)
+/// collapse large pastes into chips instead of echoing the prompt signature.
+/// Both chips prove the paste landed; waiting for literal text would paste again
+/// and then give up before ever sending Enter.
 pub fn shows_collapsed_paste(region: &str) -> bool {
-    normalize(region).contains("pasted text")
+    let normalized = normalize(region);
+    normalized.contains("pasted text") || normalized.contains("[pasted content ")
 }
 
 /// Lowercase, collapse every run of whitespace to one space, trim the ends.
@@ -550,6 +552,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_codex_collapsed_prompt_is_pasted_and_submitted_exactly_once() {
+        let child = FakeChild::new(true);
+        child.collapses_paste.store(true, Ordering::Relaxed);
+        let prompt = "Implement the migration ticket\nPreserve existing user changes";
+        let outcome = deliver_seed(child.api(), "fake", prompt, fast()).await;
+        assert_eq!(
+            outcome,
+            SeedOutcome::Submitted {
+                verified_land: true
+            }
+        );
+        assert_eq!(
+            child.written(),
+            vec![paste_bytes(prompt, true), b"\r".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_codex_chip_that_stays_in_the_box_is_not_a_successful_submission() {
+        let child = FakeChild::new(true);
+        child.collapses_paste.store(true, Ordering::Relaxed);
+        child.swallows_enter.store(true, Ordering::Relaxed);
+        let outcome = deliver_seed(child.api(), "fake", "Implement this ticket", fast()).await;
+        assert!(matches!(outcome, SeedOutcome::Failed { .. }), "{outcome:?}");
+        assert_eq!(
+            child.written()[0],
+            paste_bytes("Implement this ticket", true)
+        );
+        assert!(child.written()[1..].iter().all(|write| write == b"\r"));
+    }
+
+    #[tokio::test]
     async fn a_child_that_echoes_nothing_is_still_submitted_exactly_once() {
         // The dispatch case that used to stall: nothing paints the paste back, so a
         // land check alone would wait out its deadline and never send the Enter.
@@ -728,6 +762,7 @@ mod tests {
                 preset: None,
                 isolate_worktree: false,
                 worktree_name: None,
+                checkout_branch: None,
                 dispatch_id: None,
                 owner: 1,
             })

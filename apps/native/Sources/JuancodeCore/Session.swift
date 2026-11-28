@@ -88,6 +88,8 @@ public struct SessionEnvironment: Sendable {
                 return await OpencodeStore.capture(cwd: cwd, sinceMs: sinceMs)
             case .kimi:
                 return await KimiStore.capture(cwd: cwd, sinceMs: sinceMs)
+            case .antigravity, .cursor:
+                return nil  // these providers' stores are not read yet, so no id is discovered
             case .claude:
                 return nil  // pins the id at spawn; there is nothing to discover
             }

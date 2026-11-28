@@ -30,7 +30,10 @@ describe("dispatch model routing", () => {
         { prompt: "ticket abc-123", complexity: "simple", provider: "claude" },
         {},
       ),
-    ).toMatchObject({ provider: "claude", model: "haiku" });
+    ).toMatchObject({ provider: "claude", model: "sonnet" });
+    expect(
+      selectDispatchModel({ prompt: "Implement a settings panel", provider: "claude" }, {}),
+    ).toMatchObject({ model: "opus", complexity: "standard" });
     expect(selectDispatchModel({ prompt: "architecture", provider: "codex" }, {})).toMatchObject({
       model: "gpt-6-astra",
     });
@@ -67,6 +70,11 @@ describe("dispatch model routing", () => {
       ).model,
     ).toBe("kimi-latest");
   });
+  it("runs antigravity on the CLI's own default model", () => {
+    const routed = selectDispatchModel({ prompt: "Fix typo", provider: "antigravity" }, {});
+    expect(routed).toMatchObject({ provider: "antigravity", model: null });
+    expect(routed.reason).toContain("CLI default");
+  });
   it("allows account-specific tier mappings and CLI default", () => {
     expect(
       selectDispatchModel(
@@ -81,4 +89,14 @@ describe("dispatch model routing", () => {
       ).model,
     ).toBeNull();
   });
+});
+
+it("dispatches Cursor with its own default or an explicit model", () => {
+  expect(selectDispatchModel({ prompt: "Fix typo", provider: "cursor" }, {})).toMatchObject({
+    provider: "cursor",
+    model: null,
+  });
+  expect(
+    selectDispatchModel({ prompt: "Fix typo", provider: "cursor", model: "chosen-model" }, {}),
+  ).toMatchObject({ provider: "cursor", model: "chosen-model" });
 });

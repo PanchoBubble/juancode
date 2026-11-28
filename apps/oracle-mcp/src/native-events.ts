@@ -1115,7 +1115,6 @@ function connect(): void {
   ws = sock;
 
   sock.on("open", () => {
-    reconnectMs = 1000;
     for (const listener of connectionListeners) {
       try {
         listener();
@@ -1190,6 +1189,9 @@ function handleMessage(raw: string): void {
   }
   attention.handle(msg);
   if (msg.type === "serverInfo") {
+    // Reset backoff on the handshake, not on "open": the relay accepts the socket
+    // before it reaches the daemon, so a dead daemon still "opens" every attempt.
+    reconnectMs = 1000;
     nativeCapabilities = Array.isArray(msg.capabilities)
       ? msg.capabilities.filter((c): c is string => typeof c === "string")
       : [];

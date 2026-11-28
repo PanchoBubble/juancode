@@ -65,10 +65,12 @@ fn main() -> anyhow::Result<()> {
             TranscriptEvent::ToolResult { ok, output, .. } => {
                 format!("ok={ok} {}", one_line(output))
             }
-            TranscriptEvent::Usage { usage, .. } => format!(
-                "in={} out={} cacheRead={} cacheWrite={} reasoning={}",
-                usage.input, usage.output, usage.cache_read, usage.cache_write, usage.reasoning
-            ),
+            TranscriptEvent::Usage { usage, .. } | TranscriptEvent::UsageSnapshot { usage, .. } => {
+                format!(
+                    "in={} out={} cacheRead={} cacheWrite={} reasoning={}",
+                    usage.input, usage.output, usage.cache_read, usage.cache_write, usage.reasoning
+                )
+            }
         };
         println!(
             "{:<12} turn={:<38} {}",

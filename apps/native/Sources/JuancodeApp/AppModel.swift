@@ -40,6 +40,7 @@ private let sessionOrderKey = "juancode.sessionOrder"
 /// UserDefaults key for the sessions the user pinned to the top of their project
 /// (a plist-safe [String] of session ids).
 private let pinnedSessionsKey = "juancode.pinnedSessions"
+private let keepAliveSessionsKey = "juancode.keepAliveSessions"
 
 /// UserDefaults key for the per-project "new sessions land on a fresh worktree"
 /// toggle: project cwd → Bool (a plist-safe [String: Bool]).
@@ -1745,13 +1746,14 @@ final class AppModel {
     /// nothing moved.
     @ObservationIgnored private var pushedProtectedIds: Set<String>?
 
-    /// Tell the reaper which sessions must never be slept: the pane you have open
-    /// and the active Oracle. Called from every path that can change either (the
+    /// Tell the reaper which sessions must never be slept: the pane you have open,
+    /// the active Oracle and the sessions marked Keep Alive. Called from every path that can change either (the
     /// `selection` setter, the Oracle's session switch) and again on the health
     /// tick, so a navigation path added later can't silently leave the set stale.
     func applyReaperProtection() {
         let partner = selection.flatMap { sessionPair(for: $0)?.partner(of: $0) }
         let ids = Set([selection, partner, activeOracleSessionId].compactMap { $0 })
+            .union(keepAliveSessions)
         guard ids != pushedProtectedIds else { return }
         pushedProtectedIds = ids
         Task { [core] in await core.setReaperProtectedIds(ids) }
@@ -1825,6 +1827,25 @@ final class AppModel {
     }
 
     func isPinned(_ id: String) -> Bool { pinnedSessions.contains(id) }
+
+    /// Sessions the user told the idle reaper never to sleep — e.g. one waiting on
+    /// subscribed alerts it would otherwise miss while dormant. Merged into the
+    /// reaper's protected set, which also exempts them from the live-session cap.
+    /// Persisted.
+    var keepAliveSessions: Set<String> = Set(
+        (UserDefaults.standard.array(forKey: keepAliveSessionsKey) as? [String]) ?? []
+    ) {
+        didSet {
+            UserDefaults.standard.set(Array(keepAliveSessions), forKey: keepAliveSessionsKey)
+            applyReaperProtection()
+        }
+    }
+
+    func isKeptAlive(_ id: String) -> Bool { keepAliveSessions.contains(id) }
+
+    func toggleKeepAlive(_ id: String) {
+        if keepAliveSessions.contains(id) { keepAliveSessions.remove(id) } else { keepAliveSessions.insert(id) }
+    }
 
     /// Pin/unpin one session. Animated so the row slides to (or back from) the top
     /// instead of teleporting.
@@ -2757,20 +2778,22 @@ final class AppModel {
         }
     }
 
-    /// The Tickets rail's "Work on": a fresh Claude session in `cwd`, on its own
-    /// worktree named after the ticket, seeded with the ticket and selected. The
-    /// ticket's Linear state is left alone.
+    /// The Tickets rail's "Work on": a fresh session in `cwd`, on its own worktree
+    /// named after the ticket, seeded with the ticket and the user's prompt and selected.
+    /// The ticket's Linear state is left alone.
     ///
     /// The session joins the ticket's chain, reopening it if it was closed. A ticket in
     /// no chain starts one named after it, holding the ticket and then the session —
     /// the same rule a dispatch from an unchained session follows.
-    func workOnLinearTicket(_ ticket: LinearTicket, cwd: String) {
+    @discardableResult
+    func workOnLinearTicket(_ ticket: LinearTicket, cwd: String,
+                            provider: ProviderId, prompt: String) async -> Bool {
         let worktreeName = "\(ticket.identifier.lowercased())-\(String(UUID().uuidString.prefix(4)).lowercased())"
-        Task {
-            guard let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
-                                             isolateWorktree: true, initialInput: linearTicketPrompt(ticket),
-                                             select: true, worktreeName: worktreeName),
-                  supportsChains else { return }
+        let initialInput = "\(linearTicketPrompt(ticket))\n\n\(prompt)"
+        guard let session = await create(provider: provider, cwd: cwd, skipPermissions: true,
+                                         isolateWorktree: true, initialInput: initialInput,
+                                         select: true, worktreeName: worktreeName) else { return false }
+        if supportsChains {
             let slug: String?
             if let chain = chain(of: .linear, ref: ticket.identifier) {
                 if !chain.isActive { await reopenChain(chain.slug) }
@@ -2780,6 +2803,7 @@ final class AppModel {
             }
             if let slug { await setChain(slug, for: .session, ref: session.id) }
         }
+        return true
     }
 
     // MARK: - GitHub view (juancode-2t6)
@@ -5660,7 +5684,15 @@ final class AppModel {
     /// own records: a tracked PR's watching session and a tracked Linear ticket's
     /// session. Nothing is inferred from titles or branches.
     func chainGraphLinks(_ chain: Chain) -> [ChainGraphLink] {
-        chain.members.compactMap { member -> ChainGraphLink? in
+        // Nested dispatches: each session's recorded dispatcher (`parentSessionId`).
+        let dispatched = chain.members.compactMap { member -> ChainGraphLink? in
+            guard member.kind == .session,
+                  let meta = sessions.first(where: { $0.id == member.ref }), meta.kind == .agent,
+                  let parent = meta.parentSessionId else { return nil }
+            return ChainGraphLink(from: ChainMemberRef(kind: .session, ref: parent),
+                                  to: member.memberRef, kind: .dispatched)
+        }
+        return dispatched + chain.members.compactMap { member -> ChainGraphLink? in
             let sessionId: String?
             let kind: ChainGraphEdgeKind
             switch member.kind {
