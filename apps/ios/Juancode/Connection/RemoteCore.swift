@@ -100,6 +100,15 @@ final class RemoteCore {
     func keys(_ id: String, _ names: [String]) {
         send(["type": "key", "sessionId": id, "keys": names])
     }
+    /// A typed message: bracketed paste, then Enter a beat later, as the sidecar's `deliverReply`
+    /// does. Text and Enter back to back read as one paste and the TUI can swallow the Enter.
+    func submit(_ id: String, _ text: String) {
+        if !text.isEmpty { input(id, "\u{1b}[200~\(text)\u{1b}[201~") }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(text.isEmpty ? 0 : 150))
+            keys(id, ["Enter"])
+        }
+    }
 
     /// New agent session. `dispatchId` carries a `phone-` prefix: the core echoes it on every
     /// `activity` frame, which is how the sidecar tells a phone-started session (juancode-3aq8.7).

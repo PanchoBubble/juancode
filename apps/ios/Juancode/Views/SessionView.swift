@@ -54,8 +54,7 @@ struct SessionView: View {
                     .lineLimit(1...4)
                     .composerField()
                 SendButton(disabled: attachments.busy || (line.isEmpty && attachments.paths.isEmpty)) {
-                    core.input(sessionId, attachments.take(into: line))
-                    core.keys(sessionId, ["Enter"])
+                    core.submit(sessionId, attachments.take(into: line))
                     line = ""
                 }
             }
