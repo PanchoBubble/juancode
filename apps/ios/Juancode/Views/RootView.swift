@@ -12,6 +12,7 @@ struct RootView: View {
     @State private var popover: Popover?
     @State private var oracle = false
     @State private var keyboardUp = false
+    @AppStorage("dockCollapsed") private var dockCollapsed = false
     @State private var chat = OracleChat()
 
     enum Panel: String, Identifiable { case projects, search, chains; var id: String { rawValue } }
@@ -50,9 +51,15 @@ struct RootView: View {
         }
         .overlay(alignment: .bottomTrailing) {
             if !keyboardUp {
-                HStack(alignment: .bottom, spacing: 10) {
-                    if let popover { popoverCard(popover) }
-                    ActionDock(core: core, popover: popover) { tap($0) }
+                VStack(alignment: .trailing, spacing: 8) {
+                    if !dockCollapsed {
+                        HStack(alignment: .bottom, spacing: 10) {
+                            if let popover { popoverCard(popover) }
+                            ActionDock(core: core, popover: popover) { tap($0) }
+                        }
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                    dockToggle
                 }
                 .padding(.trailing, 12)
                 .padding(.bottom, 96) // clear the key row and input bar
@@ -85,6 +92,24 @@ struct RootView: View {
             withAnimation(.snappy) { keyboardUp = false }
         }
         .task { core.start() }
+    }
+
+    /// Always on screen so the dock can come back; a dot stands in for the hidden waiting badge.
+    private var dockToggle: some View {
+        let waiting = dockCollapsed && core.sessions.contains(where: core.isWaiting)
+        return Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { popover = nil; dockCollapsed.toggle() }
+        } label: {
+            Image(systemName: dockCollapsed ? "chevron.left" : "chevron.right")
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Tok.secondary)
+                .frame(width: 52, height: 28)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Tok.surface2))
+                .overlay(alignment: .topTrailing) {
+                    if waiting { Circle().fill(Tok.waiting).frame(width: 8, height: 8).offset(x: -2, y: -2) }
+                }
+        }
+        .accessibilityLabel(dockCollapsed ? "Show actions" : "Hide actions")
     }
 
     private func tap(_ item: ActionDock.Item) {

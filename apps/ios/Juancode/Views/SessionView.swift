@@ -67,6 +67,11 @@ struct SessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { if core.pairing.oracle != nil { ToolbarItem(placement: .topBarTrailing) { alertsMenu } } }
         .task { alerts = try? await AlertsClient.fetch(core.pairing) }
+        // A dead (killed or vanished) session must not keep the keyboard up: the dock hides under it,
+        // leaving no way to leave the session.
+        .onChange(of: core.sessions.first { $0.id == sessionId }?.status != .running, initial: true) { _, dead in
+            if dead { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+        }
     }
 
     /// Hold to record; on release the Mac's Whisper transcribes it into the field for editing.
