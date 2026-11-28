@@ -761,6 +761,10 @@ mod sweep {
         fn resize(&self, _i: &str, _o: ClientId, _c: u16, _r: u16) -> ResizeOutcome {
             unimplemented!()
         }
+        fn take_grid(&self, _i: &str, _o: ClientId, _c: u16, _r: u16) -> ResizeOutcome {
+            unimplemented!()
+        }
+        fn release_grid(&self, _i: &str, _o: ClientId) {}
         fn release_client(&self, _owner: ClientId) {}
         fn on_transcript(&self, _id: &str, _r: &[juancoded_transcripts::TranscriptRecord]) {}
         fn fold_usage(&self, _id: &str, _r: &[juancoded_transcripts::TranscriptRecord]) {}

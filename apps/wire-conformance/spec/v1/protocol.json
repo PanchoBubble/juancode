@@ -70,7 +70,7 @@
       "resizeAck": ["resizeAck"],
       "screen": ["subscribeScreen", "unsubscribeScreen", "screen"],
       "sessionMeta": ["sessionMeta"],
-      "gridOwner": ["gridChange"],
+      "gridOwner": ["gridChange", "releaseGrid", "resize.take"],
       "restartFresh": ["restartFresh"],
       "spawnModel": ["create.model"],
       "spawnPreset": ["create.preset"],
@@ -196,8 +196,14 @@
     },
     "resize": {
       "required": ["sessionId", "cols", "rows"],
-      "optional": ["seq"],
-      "notes": "seq present means the core must reply with a matching resizeAck."
+      "optional": ["seq", "take"],
+      "notes": "seq present means the core must reply with a matching resizeAck. take: true hands the grid to this client whoever holds it, instead of a denial: the client the user is driving right now (the phone on open, foreground or a keystroke; the Mac on its own layout or input). Absent is the first-claim rule, and an old core that ignores the field denies as before, which the client sees in the owner it keeps broadcasting."
+    },
+    "releaseGrid": {
+      "required": ["sessionId"],
+      "optional": [],
+      "capability": "gridOwner",
+      "notes": "Give up this connection's claim on one session's grid without closing the socket (the phone leaving a session or going to the background), so the client it took the grid from can claim it back. No reply: the effect is a gridChange with a null owner, broadcast only when this connection was the owner."
     },
     "kill": {
       "required": ["sessionId"],

@@ -1421,6 +1421,23 @@ impl SessionRegistry {
     /// The one resize path. Arbitrates, writes the pty and the grid together, and
     /// reports which of the three outcomes happened.
     pub fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome {
+        self.resize_as(id, owner, cols, rows, false)
+    }
+
+    /// `resize` for the client the user is driving now: it takes the grid from
+    /// whoever holds it, under the same lock as the resize, so nobody slips in between.
+    pub fn take_grid(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome {
+        self.resize_as(id, owner, cols, rows, true)
+    }
+
+    fn resize_as(
+        &self,
+        id: &str,
+        owner: ClientId,
+        cols: u16,
+        rows: u16,
+        take: bool,
+    ) -> ResizeOutcome {
         let Some(live) = self.get(id) else {
             // Nothing to resize, and not denied: the client should re-assert once the
             // session exists rather than give up on it.
@@ -1428,6 +1445,9 @@ impl SessionRegistry {
         };
         let pty = live.pty.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut grid = live.grid.lock().unwrap_or_else(|e| e.into_inner());
+        if take {
+            grid.take(owner);
+        }
         let holder = grid.owner();
         if !grid.request(owner) {
             return ResizeOutcome::denied(holder);
@@ -1482,6 +1502,18 @@ impl SessionRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .settled();
         applied
+    }
+
+    /// Drop `owner`'s claim on one session's grid, and tell everyone it is free.
+    pub fn release_grid(&self, id: &str, owner: ClientId) {
+        let Some(live) = self.get(id) else { return };
+        let released = {
+            let mut grid = live.grid.lock().unwrap_or_else(|e| e.into_inner());
+            grid.release(owner).then(|| (grid.cols, grid.rows))
+        };
+        if let Some((cols, rows)) = released {
+            self.broadcast_grid(id, None, cols, rows);
+        }
     }
 
     /// A connection went away: drop its grid claims so the next client can take over.

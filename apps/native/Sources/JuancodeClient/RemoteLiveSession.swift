@@ -72,6 +72,8 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
 
     /// The grid the core confirmed reached the pty, from `resizeAck.applied`.
     private var acked: (cols: Int, rows: Int)?
+    /// The grid another client drove the pty to, while it holds it.
+    private var held: (cols: Int, rows: Int)?
     /// The grid we last asked for, so an ack can be matched without a seq table.
     private var requested: (cols: Int, rows: Int)?
     /// Set when the core denied our last resize: another client owns the grid, so
@@ -115,6 +117,10 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
 
     func write(_ text: String) {
         guard !text.isEmpty else { return }
+        // Typing at the Mac while the phone drives the grid: take it back first, so the
+        // keystroke lands in a TUI laid out for this pane (juancode-3aq8.26).
+        let reclaim: (cols: Int, rows: Int)? = lock.withLock { deniedGrid ? requested : nil }
+        if let g = reclaim { _ = transport.sendResize(sessionId: id, cols: g.cols, rows: g.rows) }
         transport.sendInput(sessionId: id, text: text)
     }
 
@@ -204,10 +210,10 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
         return !denied
     }
 
-    func appliedGrid() -> (cols: Int, rows: Int)? { lock.withLock { acked } }
+    func appliedGrid() -> (cols: Int, rows: Int)? { lock.withLock { held ?? acked } }
 
-    /// No `releaseGrid` frame exists (juancode-ysjc keeps it core-side), and a
-    /// remote core releases our claims when the connection closes. Nothing to send.
+    /// Nothing to send: the Mac keeps its claims (the core frees them when the connection
+    /// closes), and a phone that wants a grid takes it (`resize` with `take`).
     func releaseGrid(owner: String) {}
 
     func gridOwner() -> String? { lock.withLock { owner } }
@@ -452,12 +458,19 @@ final class RemoteLiveSession: LiveSession, @unchecked Sendable {
     }
 
     func apply(gridOwner owner: String?, cols: Int, rows: Int) {
-        let listeners: [GridChangeListener] = lock.withLock {
+        let (listeners, reclaim): ([GridChangeListener], (cols: Int, rows: Int)?) = lock.withLock {
+            let lost = deniedGrid
             self.owner = owner
             deniedGrid = owner != nil && owner != clientId
-            return Array(gridListeners.values)
+            // Another client (the phone) resized the pty: that is the grid it has now, so a
+            // pane coming back to the front sees the drift and takes it back.
+            held = deniedGrid ? (cols, rows) : nil
+            // The phone let go of a grid it took from us: claim it back at our size.
+            let reclaim = owner == nil && lost ? requested : nil
+            return (Array(gridListeners.values), reclaim)
         }
         for l in listeners { l(owner, cols, rows) }
+        if let g = reclaim { _ = transport.sendResize(sessionId: id, cols: g.cols, rows: g.rows) }
     }
 
     /// The grid to (re)attach at: what the core confirmed, else what we asked for.

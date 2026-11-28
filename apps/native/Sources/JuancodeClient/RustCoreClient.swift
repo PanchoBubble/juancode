@@ -1369,8 +1369,10 @@ public final class RustCoreClient: CoreClient, RemoteSessionTransport, @unchecke
             nextSeq += 1
             return s
         }
+        // `take`: a Mac resize is the user at the Mac (layout, reveal, return to the app),
+        // so it takes the grid back from a phone that drove it meanwhile (juancode-3aq8.26).
         connection.send(["type": "resize", "sessionId": sessionId,
-                         "cols": cols, "rows": rows, "seq": seq])
+                         "cols": cols, "rows": rows, "seq": seq, "take": true])
         return seq
     }
 

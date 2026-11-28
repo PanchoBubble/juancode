@@ -721,6 +721,16 @@ impl SessionsApi for Fake {
     ) -> ResizeOutcome {
         unimplemented!()
     }
+    fn take_grid(
+        &self,
+        _id: &str,
+        _owner: crate::grid::ClientId,
+        _cols: u16,
+        _rows: u16,
+    ) -> crate::grid::ResizeOutcome {
+        unimplemented!()
+    }
+    fn release_grid(&self, _id: &str, _owner: crate::grid::ClientId) {}
     fn release_client(&self, _owner: crate::grid::ClientId) {}
     fn kill(&self, _id: &str) -> Result<(), StateError> {
         unreachable!("the stuck detector notifies; it never kills")

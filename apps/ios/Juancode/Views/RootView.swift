@@ -18,17 +18,33 @@ struct RootView: View {
     @GestureState private var drag = CGSize.zero
     @State private var lifted = false
     @State private var chat = OracleChat()
+    @State private var keyboardUp = false
 
     enum Panel: String, Identifiable { case projects, search, chains; var id: String { rawValue } }
     enum Popover { case new, active, keys }
 
     private var current: SessionMeta? { core.sessions.first { $0.id == selected } }
+    // On the left half the popover opens to the dock's right, so it stays on screen.
+    private var flipped: Bool { dockX < -Double(UIScreen.main.bounds.width) / 2 }
+    /// Hidden while typing (juancode-3aq8.10), unless the Keys popover was opened on purpose.
+    private var dockShown: Bool { !keyboardUp || popover == .keys }
+
+    /// Room the terminal leaves for the dock, so it never covers text. Along the dock's short side:
+    /// the collapsed chevron costs a few rows at the bottom rather than ~10 of ~58 columns, and the
+    /// open dock (a tall column) a side gutter rather than half the rows. Reflows the pty on toggle.
+    /// shortcut: assumes the dock sits at a screen edge; dragged mid-screen it still covers some text.
+    private var terminalInset: EdgeInsets {
+        guard dockShown else { return EdgeInsets() }
+        if dockCollapsed, dockY > -40 { return EdgeInsets(top: 0, leading: 0, bottom: 60, trailing: 0) }
+        return flipped ? EdgeInsets(top: 0, leading: 66, bottom: 0, trailing: 0)
+                       : EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 66)
+    }
 
     var body: some View {
         NavigationStack {
             Group {
                 if let id = selected {
-                    SessionView(core: core, sessionId: id).id(id)
+                    SessionView(core: core, sessionId: id, terminalInset: terminalInset).id(id)
                 } else {
                     ContentUnavailableView("No session", systemImage: "terminal",
                                            description: Text(core.lastError ?? "Tap ⌃ for actions, then ☰ or ⚡︎."))
@@ -55,25 +71,24 @@ struct RootView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            // On the left half the popover opens to the dock's right, so it stays on screen.
-            let flipped = dockX < -Double(UIScreen.main.bounds.width) / 2
-            VStack(alignment: flipped ? .leading : .trailing, spacing: 8) {
-                if !dockCollapsed {
+            if dockShown {
+                VStack(alignment: flipped ? .leading : .trailing, spacing: 8) {
                     HStack(alignment: .bottom, spacing: 10) {
                         if !flipped, let popover { popoverCard(popover) }
-                        ActionDock(core: core, popover: popover, hasSession: selected != nil) { tap($0) }
+                        ActionDock(core: core, popover: popover, hasSession: selected != nil,
+                                   expanded: !dockCollapsed) { tap($0) }
                         if flipped, let popover { popoverCard(popover) }
                     }
-                    .transition(.scale(scale: 0.3, anchor: .bottomTrailing).combined(with: .opacity))
+                    dockToggle
                 }
-                dockToggle
+                .padding(.trailing, 12)
+                .padding(.bottom, 72) // clear the input bar
+                .scaleEffect(lifted ? 1.04 : 1)
+                .offset(x: dockX + drag.width, y: dockY + drag.height)
+                .simultaneousGesture(moveDock)
+                .sensoryFeedback(.impact, trigger: lifted) { _, up in up }
+                .transition(.opacity)
             }
-            .padding(.trailing, 12)
-            .padding(.bottom, 72) // clear the input bar; rides above the keyboard with it
-            .scaleEffect(lifted ? 1.04 : 1)
-            .offset(x: dockX + drag.width, y: dockY + drag.height)
-            .simultaneousGesture(moveDock)
-            .sensoryFeedback(.impact, trigger: lifted) { _, up in up }
         }
         .sheet(item: $panel) { p in
             Group {
@@ -95,7 +110,13 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            if popover != .keys { withAnimation(.snappy) { popover = nil } }
+            withAnimation(.snappy) {
+                keyboardUp = true
+                if popover != .keys { popover = nil }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.snappy) { keyboardUp = false }
         }
         .task { core.start() }
     }
@@ -125,9 +146,10 @@ struct RootView: View {
         return Button {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { popover = nil; dockCollapsed.toggle() }
         } label: {
-            Image(systemName: "chevron.up")
+            // Stays put: the items do the moving. Just a quiet symbol swap.
+            Image(systemName: dockCollapsed ? "chevron.up" : "chevron.down")
                 .font(.system(size: 15, weight: .bold)).foregroundStyle(Tok.text)
-                .rotationEffect(.degrees(dockCollapsed ? 0 : 180)) // spins with the dock's spring
+                .contentTransition(.symbolEffect(.replace.downUp))
                 .frame(width: 44, height: 44)
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(Circle().stroke(Tok.surface2))
@@ -185,16 +207,18 @@ struct ActionDock: View {
     let core: RemoteCore
     let popover: RootView.Popover?
     let hasSession: Bool
+    let expanded: Bool
     let tap: (Item) -> Void
 
     enum Item { case chains, search, active, projects, keys, new }
 
     var body: some View {
         let waiting = core.sessions.filter(core.isWaiting).count
+        let n = hasSession ? 5 : 4 // pill items; stagger order counts up from the + button
         VStack(spacing: 10) {
             VStack(spacing: 4) {
-                button(.chains, "link", "Chains")
-                button(.search, "magnifyingglass", "Search")
+                button(.chains, "link", "Chains").emerge(expanded, order: n, travel: 44)
+                button(.search, "magnifyingglass", "Search").emerge(expanded, order: n - 1, travel: 44)
                 button(.active, "bolt.fill", "Active sessions, \(waiting) waiting for input", selected: popover == .active)
                     .overlay(alignment: .topTrailing) {
                         if waiting > 0 {
@@ -205,12 +229,16 @@ struct ActionDock: View {
                         }
                     }
                     .animation(.spring, value: waiting)
-                button(.projects, "line.3.horizontal", "Projects")
-                if hasSession { button(.keys, "command", "Keys", selected: popover == .keys) }
+                    .emerge(expanded, order: n - 2, travel: 44)
+                button(.projects, "line.3.horizontal", "Projects").emerge(expanded, order: n - 3, travel: 44)
+                if hasSession {
+                    button(.keys, "command", "Keys", selected: popover == .keys).emerge(expanded, order: 1, travel: 44)
+                }
             }
             .padding(4)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().stroke(Tok.surface2))
+            .emerge(expanded, order: 1, travel: 30, scale: 0.85)
             Button { tap(.new) } label: {
                 Image(systemName: "plus").font(.title2.weight(.semibold)).foregroundStyle(.white)
                     .rotationEffect(.degrees(popover == .new ? 45 : 0))
@@ -219,7 +247,10 @@ struct ActionDock: View {
                     .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
             }
             .accessibilityLabel(popover == .new ? "Close" : "New session")
+            .emerge(expanded, order: 0, travel: 40)
         }
+        .allowsHitTesting(expanded)
+        .accessibilityHidden(!expanded)
     }
 
     private func button(_ item: Item, _ icon: String, _ label: String, selected: Bool = false) -> some View {
@@ -257,5 +288,17 @@ struct KeyPad: View {
                 .accessibilityLabel(k.keys?.first ?? k.label)
             }
         }
+    }
+}
+
+private extension View {
+    /// The dock's open/close motion: each piece rises out of the chevron, staggered from the
+    /// + button up on the way in and from the top down on the way out, on one soft spring.
+    func emerge(_ shown: Bool, order: Int, travel: CGFloat, scale: CGFloat = 0.6) -> some View {
+        scaleEffect(shown ? 1 : scale, anchor: .bottom)
+            .offset(y: shown ? 0 : travel)
+            .opacity(shown ? 1 : 0)
+            .animation(.spring(response: 0.38, dampingFraction: 0.82)
+                .delay(shown ? Double(order) * 0.03 : Double(max(0, 5 - order)) * 0.02), value: shown)
     }
 }

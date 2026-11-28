@@ -7,6 +7,8 @@ import SwiftUI
 struct SessionView: View {
     let core: RemoteCore
     let sessionId: String
+    /// Room left for the dock (`RootView.terminalInset`), so it never covers terminal text.
+    var terminalInset = EdgeInsets()
     @State private var line = ""
     @State private var alerts: AlertsState?
     @State private var recorder = VoiceRecorder()
@@ -17,6 +19,9 @@ struct SessionView: View {
     var body: some View {
         VStack(spacing: 0) {
             TerminalPane(core: core, sessionId: sessionId)
+                .padding(terminalInset)
+                // One reflow at the final size, not a pty resize per frame of the dock's spring.
+                .transaction { $0.animation = nil }
             if let voiceError { Text(voiceError).font(.caption).foregroundStyle(.red).padding(.horizontal, 8) }
             AttachmentChips(attachments: attachments)
             HStack(alignment: .bottom, spacing: 6) {
@@ -112,10 +117,10 @@ struct SessionView: View {
 
 /// SwiftTerm view fed by `attached` + `output`; what it types goes back as `input`.
 ///
-/// The pty has one grid, owned by the first client to size it (juancoded `GridState`). When the Mac
-/// owns it the phone's resize is denied, and bytes drawn for the Mac's width garble a phone-width
-/// emulator. So the phone lays its terminal out at the owner's grid and zooms it to fit (pinch to
-/// read); only when the grid is free or its own does it size the pty to the phone.
+/// The pty has one grid (juancoded `GridState`). The phone takes it while it is driving the session
+/// (open, foreground, input) so the pty reflows to the phone, and releases it on leave/background
+/// (`RemoteCore`). If the Mac holds it anyway (it took it back, or an old core), bytes drawn for
+/// the Mac's width would garble here, so the phone then lays out at that grid and zooms to fit.
 private struct TerminalPane: UIViewRepresentable {
     let core: RemoteCore
     let sessionId: String
@@ -128,7 +133,6 @@ private struct TerminalPane: UIViewRepresentable {
         view.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         view.keyboardDismissMode = .onDrag
         let host = TerminalHost(term: view)
-        host.follow = core.foreignGrid[sessionId]
         context.coordinator.host = host
         // With the keyboard up a tap closes it; SwiftTerm's own tap (focus, clicks) waits for this
         // one to fail, which it does at once while the keyboard is down.
@@ -151,6 +155,10 @@ private struct TerminalPane: UIViewRepresentable {
     }
 
     func updateUIView(_ view: TerminalHost, context: Context) {}
+
+    static func dismantleUIView(_ view: TerminalHost, coordinator: Coordinator) {
+        coordinator.core.leave(coordinator.sessionId)
+    }
 
     @MainActor
     final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate, UIGestureRecognizerDelegate {

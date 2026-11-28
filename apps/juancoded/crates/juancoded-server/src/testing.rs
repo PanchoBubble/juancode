@@ -269,6 +269,10 @@ impl SessionsApi for FakeChild {
     fn resize(&self, _id: &str, _o: ClientId, _c: u16, _r: u16) -> ResizeOutcome {
         unimplemented!()
     }
+    fn take_grid(&self, _i: &str, _o: ClientId, _c: u16, _r: u16) -> ResizeOutcome {
+        unimplemented!()
+    }
+    fn release_grid(&self, _i: &str, _o: ClientId) {}
     fn release_client(&self, _owner: ClientId) {}
     fn kill(&self, _id: &str) -> Result<(), StateError> {
         self.running.store(false, Ordering::Relaxed);

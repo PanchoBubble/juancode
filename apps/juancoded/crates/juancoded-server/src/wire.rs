@@ -412,6 +412,17 @@ pub enum ClientMessage {
         cols: u16,
         rows: u16,
         seq: Option<i64>,
+        /// Take the grid from whoever holds it rather than be denied: the client the
+        /// user is driving right now (the phone on open, foreground or a keystroke;
+        /// the Mac on its own layout or input) sizes the pty. Absent is the old
+        /// first-claim rule, so a client that never sends it behaves as before.
+        take: bool,
+    },
+    /// Give up this connection's claim on one session's grid (the phone going to the
+    /// background or leaving the session), so the client it took it from can claim it
+    /// back without waiting for this socket to close. A no-op when not the owner.
+    ReleaseGrid {
+        session_id: String,
     },
     Kill {
         session_id: String,
@@ -974,6 +985,8 @@ struct RawClient {
     #[serde(default)]
     seq: Option<i64>,
     #[serde(default)]
+    take: Option<bool>,
+    #[serde(default)]
     text: Option<String>,
     #[serde(rename = "messageId", default)]
     message_id: Option<String>,
@@ -1169,6 +1182,10 @@ impl ClientMessage {
                 cols: raw.cols.ok_or("missing cols")?,
                 rows: raw.rows.ok_or("missing rows")?,
                 seq: raw.seq,
+                take: raw.take.unwrap_or(false),
+            }),
+            "releaseGrid" => Ok(Self::ReleaseGrid {
+                session_id: need_session()?,
             }),
             "kill" => Ok(Self::Kill {
                 session_id: need_session()?,
@@ -3352,6 +3369,28 @@ mod tests {
         assert_eq!(v["sessionId"], "s1");
         assert_eq!(v["session"]["id"], "s1");
         assert_eq!(v["session"]["cwd"], "/tmp");
+    }
+
+    #[test]
+    fn resize_take_is_opt_in_and_release_grid_parses() {
+        let plain =
+            ClientMessage::decode(r#"{"type":"resize","sessionId":"s","cols":80,"rows":24}"#)
+                .unwrap();
+        assert!(matches!(plain, ClientMessage::Resize { take: false, .. }));
+        let take = ClientMessage::decode(
+            r#"{"type":"resize","sessionId":"s","cols":58,"rows":40,"take":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            take,
+            ClientMessage::Resize {
+                take: true,
+                cols: 58,
+                ..
+            }
+        ));
+        let release = ClientMessage::decode(r#"{"type":"releaseGrid","sessionId":"s"}"#).unwrap();
+        assert!(matches!(release, ClientMessage::ReleaseGrid { session_id } if session_id == "s"));
     }
 
     #[test]

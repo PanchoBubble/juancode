@@ -77,6 +77,35 @@ async fn the_grid_passes_to_the_next_client_when_its_owner_disconnects() {
     assert_one_grid(&harness.sessions, &id, "a handover");
 }
 
+/// juancode-3aq8.26: the client the user is driving takes the grid, and a release
+/// hands it back, so the phone reflows the pty to its own size and the Mac can
+/// reclaim it without either one disconnecting.
+#[tokio::test]
+async fn the_driving_client_takes_the_grid_and_a_release_hands_it_back() {
+    let harness = Harness::new("take");
+    let id = harness.create("/tmp", 80, 24, DESKTOP).await;
+    assert!(harness.sessions.resize(&id, DESKTOP, 200, 50).applied);
+
+    let taken = harness.sessions.take_grid(&id, PHONE, 58, 40);
+    assert!(taken.applied && !taken.denied, "{taken:?}");
+    assert_eq!(taken.owner, Some(PHONE));
+    assert_eq!(harness.sessions.grid(&id), Some((58, 40)));
+    assert_one_grid(&harness.sessions, &id, "a take");
+    assert!(
+        harness.sessions.resize(&id, DESKTOP, 200, 50).denied,
+        "a plain resize still loses to the taker"
+    );
+
+    // Only the owner can release; then the plain first-claim rule applies again.
+    harness.sessions.release_grid(&id, DESKTOP);
+    assert_eq!(harness.sessions.grid_owner(&id), Some(PHONE));
+    harness.sessions.release_grid(&id, PHONE);
+    assert_eq!(harness.sessions.grid_owner(&id), None);
+    assert!(harness.sessions.resize(&id, DESKTOP, 200, 50).applied);
+    assert_eq!(harness.sessions.grid(&id), Some((200, 50)));
+    assert_one_grid(&harness.sessions, &id, "a take-back");
+}
+
 #[tokio::test]
 async fn resizing_a_session_that_does_not_exist_is_not_a_denial() {
     let harness = Harness::new("missing");

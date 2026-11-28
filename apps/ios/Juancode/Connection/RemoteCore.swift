@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import JuancodeWire
 
 /// The one connection to the Mac: `/ws` on the relay plus its REST reads, both
@@ -29,7 +30,17 @@ final class RemoteCore {
     /// Re-sent after a reconnect, so the open terminal picks up where it left off.
     @ObservationIgnored private var attachedTo: (id: String, cols: Int, rows: Int)?
 
-    init(pairing: Pairing) { self.pairing = pairing }
+    init(pairing: Pairing) {
+        self.pairing = pairing
+        let nc = NotificationCenter.default
+        // Back in front: the phone is what the user is driving again. Away: let the Mac have it.
+        nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { if let a = self?.attachedTo { self?.take(a.id) } }
+        }
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { if let a = self?.attachedTo { self?.send(["type": "releaseGrid", "sessionId": a.id]) } }
+        }
+    }
 
     func start() {
         guard wire == nil else { return }
@@ -86,19 +97,44 @@ final class RemoteCore {
 
     // MARK: Client frames
 
+    /// Opening a session is driving it: attach, then take the grid at the phone's size, so the pty
+    /// reflows to it as it does to the Mac's pane (juancode-3aq8.26).
     func attach(_ id: String, cols: Int, rows: Int) {
         attachedTo = (id, cols, rows)
         send(["type": "attach", "sessionId": id, "cols": cols, "rows": rows])
+        take(id)
+    }
+    /// Leaving the session: hand the grid back so the Mac reflows to its own pane.
+    func leave(_ id: String) {
+        guard attachedTo?.id == id else { return }
+        attachedTo = nil
+        send(["type": "releaseGrid", "sessionId": id])
+    }
+    /// Take the grid at the phone's own size. A core without `take` denies it silently and keeps
+    /// broadcasting the Mac's grid, so after a beat fall back to following (zoom to fit) that.
+    private func take(_ id: String) {
+        guard let a = attachedTo, a.id == id else { return }
+        send(["type": "resize", "sessionId": id, "cols": a.cols, "rows": a.rows, "take": true])
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            if attachedTo?.id == id, let g = foreignGrid[id] { onGrid?(id, g) }
+        }
+    }
+    /// Input means the user is driving from the phone: take the grid back if the Mac has it.
+    private func drive(_ id: String) {
+        if foreignGrid[id] != nil { take(id) }
     }
     func resize(_ id: String, cols: Int, rows: Int) {
         if attachedTo?.id == id { attachedTo = (id, cols, rows) }
         send(["type": "resize", "sessionId": id, "cols": cols, "rows": rows])
     }
     func input(_ id: String, _ text: String) {
+        drive(id)
         send(["type": "input", "sessionId": id, "data": text])
     }
     /// Named keys (Escape, Up, C-c, …), resolved by the core — see `named_key.rs`.
     func keys(_ id: String, _ names: [String]) {
+        drive(id)
         send(["type": "key", "sessionId": id, "keys": names])
     }
     /// A typed message: bracketed paste, then Enter a beat later, as the sidecar's `deliverReply`

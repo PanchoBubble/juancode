@@ -93,6 +93,11 @@ impl GridState {
         }
     }
 
+    /// Hand the grid to `client` whoever held it: the client the user is driving now.
+    pub fn take(&mut self, client: ClientId) {
+        self.owner = Some(client);
+    }
+
     /// Record the geometry the owner asked for. `applied` says whether it reached a
     /// live pty; when it did not, the grid stays marked for re-assertion.
     pub fn set(&mut self, cols: u16, rows: u16, applied: bool) {

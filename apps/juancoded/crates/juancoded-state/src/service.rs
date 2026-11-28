@@ -142,6 +142,10 @@ pub trait SessionsApi: Send + Sync {
     /// Cancel a still-pending message; `false` when it was not in that queue.
     fn dequeue_message(&self, id: &str, message_id: &str) -> Result<bool, StateError>;
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
+    /// `resize`, but taking the grid from whoever holds it instead of being denied.
+    fn take_grid(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome;
+    /// Drop `owner`'s claim on one session's grid; a no-op for a non-owner.
+    fn release_grid(&self, id: &str, owner: ClientId);
     fn release_client(&self, owner: ClientId);
     fn kill(&self, id: &str) -> Result<(), StateError>;
     /// Forget a session: kill it, drop its row, keep its conversation from being
@@ -409,6 +413,14 @@ impl SessionsApi for SessionRegistry {
 
     fn resize(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome {
         SessionRegistry::resize(self, id, owner, cols, rows)
+    }
+
+    fn take_grid(&self, id: &str, owner: ClientId, cols: u16, rows: u16) -> ResizeOutcome {
+        SessionRegistry::take_grid(self, id, owner, cols, rows)
+    }
+
+    fn release_grid(&self, id: &str, owner: ClientId) {
+        SessionRegistry::release_grid(self, id, owner)
     }
 
     fn release_client(&self, owner: ClientId) {

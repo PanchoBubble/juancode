@@ -1334,6 +1334,7 @@ fn handle_client_message(
             cols,
             rows,
             seq,
+            take,
         } => {
             // A session's grid is arbitrated between its viewers; an ephemeral pty's
             // is not, because it has exactly one. So an ephemeral resize is never
@@ -1341,7 +1342,11 @@ fn handle_client_message(
             let (applied, denied, owner) = if ephemeral.holds(&session_id) {
                 (ephemeral.resize(&session_id, cols, rows), false, None)
             } else {
-                let outcome = sessions.resize(&session_id, client, cols, rows);
+                let outcome = if take {
+                    sessions.take_grid(&session_id, client, cols, rows)
+                } else {
+                    sessions.resize(&session_id, client, cols, rows)
+                };
                 (outcome.applied, outcome.denied, outcome.owner)
             };
             if let Some(seq) = seq {
@@ -1356,6 +1361,8 @@ fn handle_client_message(
                 });
             }
         }
+
+        ClientMessage::ReleaseGrid { session_id } => sessions.release_grid(&session_id, client),
 
         ClientMessage::Kill { session_id } => {
             if ephemeral.holds(&session_id) {
@@ -3688,6 +3695,7 @@ mod tests {
                 cols: 100,
                 rows: 30,
                 seq: Some(1),
+                take: false,
             },
             &mut fanout,
         );

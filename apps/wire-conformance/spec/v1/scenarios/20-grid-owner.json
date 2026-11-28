@@ -1,7 +1,7 @@
 {
   "id": "grid-owner",
   "title": "who owns the shared grid, and when it is let go",
-  "asserts": "every client learns who controls a session's pty grid, not just whether its own resize was refused: the owner is named on the ack and broadcast on every change, a connection that arrives while the grid is claimed is told so on arrival, and a release is broadcast when the owner disconnects. Without this a viewer cannot render a pane read-only, and can never tell that the grid is free again.",
+  "asserts": "every client learns who controls a session's pty grid, not just whether its own resize was refused: the owner is named on the ack and broadcast on every change, a connection that arrives while the grid is claimed is told so on arrival, a release is broadcast when the owner disconnects or sends releaseGrid, and a resize with take hands the grid to the client the user is driving. Without this a viewer cannot render a pane read-only, and can never tell that the grid is free again.",
   "requires": [
     "pty"
   ],
@@ -176,6 +176,96 @@
         "owner": "$clientB"
       },
       "on": "b"
+    },
+    {
+      "open": "c",
+      "keep": true,
+      "note": "a third client, the phone, arrives while b drives the grid"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": "$clientB"
+      },
+      "on": "c",
+      "timeoutMs": 10000
+    },
+    {
+      "send": {
+        "type": "resize",
+        "sessionId": "$session",
+        "cols": 58,
+        "rows": 40,
+        "seq": 11,
+        "take": true
+      },
+      "on": "c"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": "$clientC",
+        "cols": 58,
+        "rows": 40
+      },
+      "on": "b",
+      "timeoutMs": 10000,
+      "note": "take: the client the user is driving gets the grid instead of a denial, and the old owner hears it"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": "$clientC",
+        "cols": 58,
+        "rows": 40
+      },
+      "on": "c"
+    },
+    {
+      "expect": {
+        "type": "resizeAck",
+        "sessionId": "$session",
+        "seq": 11,
+        "applied": true,
+        "denied": false,
+        "owner": "$clientC"
+      },
+      "on": "c"
+    },
+    {
+      "send": {
+        "type": "releaseGrid",
+        "sessionId": "$session"
+      },
+      "on": "b",
+      "note": "a non-owner's release is a no-op"
+    },
+    {
+      "expectNone": {
+        "type": "gridChange"
+      },
+      "withinMs": 800,
+      "on": "c"
+    },
+    {
+      "send": {
+        "type": "releaseGrid",
+        "sessionId": "$session"
+      },
+      "on": "c"
+    },
+    {
+      "expect": {
+        "type": "gridChange",
+        "sessionId": "$session",
+        "owner": null
+      },
+      "on": "b",
+      "timeoutMs": 10000,
+      "note": "the owner let go without disconnecting, so b may claim its grid back"
     }
   ]
 }
