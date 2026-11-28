@@ -768,8 +768,8 @@ final class AppModel {
 
     // MARK: - Turn-end notifications (Dock bounce + unread badge)
 
-    /// Sessions that finished a turn (or now need input) while you weren't watching
-    /// them. Their count drives the Dock badge; clearing happens when you view the
+    /// Sessions that now need input while you weren't watching them (finished turns
+    /// live in `unseenCompletions`, not here). Their count drives the Dock badge; clearing happens when you view the
     /// session or return to the app.
     private(set) var unreadSessions: Set<String> = []
 
@@ -1979,8 +1979,12 @@ final class AppModel {
         // The open Oracle dock is the "viewer" for Oracle's own (sidebar-hidden)
         // sessions — don't accrue an unclearable unread while you're looking at it.
         if NSApp.isActive, oracleDockExpanded, isOracleSession(sessionId) { return }
-        unreadSessions.insert(sessionId)
-        updateDockBadge()
+        // Only a session blocked on you goes in the bell/unread list; a finished turn keeps
+        // just its green done-unseen check (`unseenCompletions`).
+        if state == .waitingInput {
+            unreadSessions.insert(sessionId)
+            updateDockBadge()
+        }
         NSApp.requestUserAttention(state == .waitingInput ? .criticalRequest : .informationalRequest)
     }
 
