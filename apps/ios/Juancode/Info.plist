@@ -33,7 +33,9 @@
 	<string>1</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the pairing QR from juancode Settings → Phone.</string>
-	<key>UILaunchScreen</key>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Hold the mic button to dictate a message; the audio goes to your Mac for transcription.</string>
+	<key>UILaunchScreen</key></key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>

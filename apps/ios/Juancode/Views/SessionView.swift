@@ -1,4 +1,5 @@
 import SwiftTerm
+import AVFoundation
 import SwiftUI
 
 /// One session: the terminal, a key row for what the soft keyboard lacks, and an
@@ -8,6 +9,9 @@ struct SessionView: View {
     let sessionId: String
     @State private var line = ""
     @State private var alerts: AlertsState?
+    @State private var recorder = VoiceRecorder()
+    @State private var transcribing = false
+    @State private var voiceError: String?
 
     private static let keyRow: [(label: String, keys: [String]?, text: String?)] = [
         ("Esc", ["Escape"], nil), ("↑", ["Up"], nil), ("↓", ["Down"], nil),
@@ -31,7 +35,9 @@ struct SessionView: View {
                 .padding(.horizontal, 8)
             }
             .padding(.vertical, 4)
+            if let voiceError { Text(voiceError).font(.caption).foregroundStyle(.red).padding(.horizontal, 8) }
             HStack {
+                if core.pairing.oracle != nil { micButton }
                 TextField("Message", text: $line, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
@@ -49,6 +55,33 @@ struct SessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { if core.pairing.oracle != nil { ToolbarItem(placement: .topBarTrailing) { alertsMenu } } }
         .task { alerts = try? await AlertsClient.fetch(core.pairing) }
+    }
+
+    /// Hold to record; on release the Mac's Whisper transcribes it into the field for editing.
+    private var micButton: some View {
+        Image(systemName: recorder.isRecording ? "mic.circle.fill" : "mic.circle")
+            .font(.title2)
+            .foregroundStyle(recorder.isRecording ? .red : .accentColor)
+            .opacity(transcribing ? 0.4 : 1)
+            .accessibilityLabel("Hold to talk")
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !recorder.isRecording, !transcribing else { return }
+                    voiceError = nil
+                    Task { if !(await recorder.start()) { voiceError = "Microphone access is off for juancode." } }
+                }
+                .onEnded { _ in
+                    guard let url = recorder.stop(), let oracle = core.pairing.oracle else { return }
+                    transcribing = true
+                    Task {
+                        defer { transcribing = false; try? FileManager.default.removeItem(at: url) }
+                        do {
+                            let client = SidecarClient(base: oracle, token: core.pairing.token)
+                            let text = try await client.transcribe(m4a: Data(contentsOf: url))
+                            line += (line.isEmpty || text.isEmpty ? "" : " ") + text
+                        } catch { voiceError = error.localizedDescription }
+                    }
+                })
     }
 
     /// Per-session push toggle, plus the ntfy topic to subscribe to in the ntfy app.
@@ -138,5 +171,45 @@ private struct TerminalPane: UIViewRepresentable {
         }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+/// Records AAC/m4a to a temp file while the mic button is held.
+@MainActor @Observable
+final class VoiceRecorder {
+    private(set) var isRecording = false
+    private var rec: AVAudioRecorder?
+    private var releasedEarly = false
+
+    /// false when the mic is denied (or the recorder would not start). A release that lands
+    /// while the permission prompt is up cancels the start.
+    func start() async -> Bool {
+        releasedEarly = false
+        guard await AVAudioApplication.requestRecordPermission(), !releasedEarly else { return !releasedEarly }
+        let url = FileManager.default.temporaryDirectory.appending(path: "voice-\(UUID().uuidString).m4a")
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default)
+            try AVAudioSession.sharedInstance().setActive(true)
+            let r = try AVAudioRecorder(url: url, settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16_000, AVNumberOfChannelsKey: 1,
+            ])
+            guard r.record() else { return false }
+            rec = r
+            isRecording = true
+            return true
+        } catch { return false }
+    }
+
+    /// The finished recording, or nil if nothing was recording or it was a sub-half-second tap.
+    func stop() -> URL? {
+        releasedEarly = true
+        guard let r = rec else { return nil }
+        let long = r.currentTime >= 0.5
+        r.stop()
+        rec = nil
+        isRecording = false
+        try? AVAudioSession.sharedInstance().setActive(false)
+        if !long { try? FileManager.default.removeItem(at: r.url) }
+        return long ? r.url : nil
     }
 }

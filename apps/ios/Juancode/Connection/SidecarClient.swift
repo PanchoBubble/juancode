@@ -16,6 +16,23 @@ struct SidecarClient: Sendable {
         var errorDescription: String?
     }
 
+    /// Whisper on the Mac: an m4a recording in, its transcript out (`POST /api/transcribe`).
+    func transcribe(m4a: Data) async throws -> String {
+        var req = URLRequest(url: base.appending(path: "api/transcribe"))
+        req.httpMethod = "POST"
+        req.timeoutInterval = 240
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
+        let (data, resp) = try await URLSession.shared.upload(for: req, from: m4a)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            throw Failure(errorDescription: status == 401
+                ? "The sidecar rejected the pairing token. Scan the QR again."
+                : "Transcription failed (\(status)).")
+        }
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["text"] as? String ?? ""
+    }
+
     func chat(text: String, sessionId: String?, provider: String) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { cont in
             let task = Task {

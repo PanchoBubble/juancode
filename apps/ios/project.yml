@@ -33,6 +33,7 @@ targets:
         CFBundleDisplayName: juancode
         UILaunchScreen: {}
         NSCameraUsageDescription: Scan the pairing QR from juancode Settings → Phone.
+        NSMicrophoneUsageDescription: Hold the mic button to dictate a message; the audio goes to your Mac for transcription.
         CFBundleURLTypes:
           - CFBundleURLName: com.juanone.juancode
             CFBundleURLSchemes: [juancode]

@@ -67,6 +67,7 @@ import { openScreenStream, type ScreenPatch } from "./screen-stream.ts";
 import { KEY_NAMES, unknownKey, unknownKeyMessage } from "./keys.ts";
 import { registerGithubWebhook } from "./github-webhook.ts";
 import { loadOrCreateToken, remoteAuth } from "./remote-auth.ts";
+import { transcribeBytes } from "./transcribe.ts";
 import { PhoneAlerts } from "./phone-alerts.ts";
 import { readTriggerConfig, triggerConfigFile, triggersDisabledByEnv } from "./triggers.ts";
 import { readScheduleState, startScheduleTriggers, triggerStateFile } from "./trigger-schedules.ts";
@@ -743,6 +744,34 @@ registerGithubWebhook(app);
 // After the webhook (HMAC-verified on its own), before every other route.
 app.use(remoteAuth(loadOrCreateToken()));
 app.use(express.json());
+
+// Phone hold-to-talk (juancode-3aq8.8): raw audio in, `{text}` out, via the same local
+// whisper the Telegram bridge uses. Behind remoteAuth like every route.
+const AUDIO_EXTS: Record<string, string> = {
+  "audio/mp4": ".m4a",
+  "audio/m4a": ".m4a",
+  "audio/x-m4a": ".m4a",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+  "audio/mpeg": ".mp3",
+  "audio/ogg": ".ogg",
+};
+app.post(
+  "/api/transcribe",
+  express.raw({ type: "audio/*", limit: "25mb" }),
+  async (req: Request, res: Response) => {
+    const ext = AUDIO_EXTS[(req.headers["content-type"] ?? "").split(";")[0]!.trim()];
+    if (!ext || !Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: "send the recording as a non-empty audio/* body" });
+      return;
+    }
+    try {
+      res.json({ text: await transcribeBytes(req.body, ext) });
+    } catch (e) {
+      sendErr(res, e);
+    }
+  },
+);
 
 app.get("/healthz", (_req: Request, res: Response) => {
   res.json({ ok: true, service: "oracle-mcp" });

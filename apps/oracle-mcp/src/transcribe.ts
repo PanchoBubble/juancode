@@ -132,14 +132,23 @@ export function makeTranscriber(
   return async (fileId: string) => {
     const filePath = await getFilePath(token, fileId);
     const bytes = await downloadFile(token, filePath);
-    const ext = extname(filePath) || ".ogg";
-    const dir = await mkdtemp(join(tmpdir(), "oracle-stt-"));
-    const audioPath = join(dir, `audio${ext}`);
-    try {
-      await writeFile(audioPath, bytes);
-      return await runWhisper(cfg, audioPath, dir);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    return transcribeBytes(bytes, extname(filePath) || ".ogg", cfg);
   };
+}
+
+/** Transcribe in-memory audio: temp file → whisper → always clean up. Shared by the
+ *  Telegram bridge and the phone's `/api/transcribe`. `ext` includes the dot. */
+export async function transcribeBytes(
+  bytes: Buffer,
+  ext: string,
+  cfg: WhisperConfig = readWhisperConfig(),
+): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "oracle-stt-"));
+  try {
+    const audioPath = join(dir, `audio${ext}`);
+    await writeFile(audioPath, bytes);
+    return await runWhisper(cfg, audioPath, dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
