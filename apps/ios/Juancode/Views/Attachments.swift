@@ -42,11 +42,12 @@ final class Attachments {
     }
 }
 
-/// Paperclip menu (photo library or Files) plus the pending chips. Needs no usage strings:
-/// PhotosPicker and the file importer run out of process.
+/// Paperclip menu (photo library or Files), or a + menu that also offers voice when `voice` is
+/// given. Needs no usage strings: PhotosPicker and the file importer run out of process.
 struct AttachButton: View {
     let attachments: Attachments
     let client: SidecarClient
+    var voice: (() -> Void)?
     @State private var photos: [PhotosPickerItem] = []
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -55,8 +56,9 @@ struct AttachButton: View {
         Menu {
             Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo") }
             Button { showFiles = true } label: { Label("Files", systemImage: "folder") }
+            if let voice { Button(action: voice) { Label("Voice", systemImage: "mic") } }
         } label: {
-            Image(systemName: "paperclip").composerIcon()
+            Image(systemName: voice == nil ? "paperclip" : "plus").composerIcon()
         }
         .accessibilityLabel("Attach")
         .photosPicker(isPresented: $showPhotos, selection: $photos, matching: .any(of: [.images, .videos]))

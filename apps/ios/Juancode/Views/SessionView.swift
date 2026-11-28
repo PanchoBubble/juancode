@@ -47,8 +47,12 @@ struct SessionView: View {
             AttachmentChips(attachments: attachments)
             HStack(alignment: .bottom, spacing: 6) {
                 if let oracle = core.pairing.oracle {
-                    AttachButton(attachments: attachments, client: SidecarClient(base: oracle, token: core.pairing.token))
-                    micButton
+                    if recorder.isRecording || transcribing {
+                        stopButton
+                    } else {
+                        AttachButton(attachments: attachments, client: SidecarClient(base: oracle, token: core.pairing.token),
+                                     voice: startRecording)
+                    }
                 }
                 TextField("Message", text: $line, axis: .vertical)
                     .lineLimit(1...4)
@@ -71,31 +75,34 @@ struct SessionView: View {
         }
     }
 
-    /// Hold to record; on release the Mac's Whisper transcribes it into the field for editing.
-    private var micButton: some View {
-        Image(systemName: recorder.isRecording ? "mic.fill" : "mic")
+    private func startRecording() {
+        voiceError = nil
+        Task { if !(await recorder.start()) { voiceError = "Microphone access is off for juancode." } }
+    }
+
+    /// Shown while recording (from + → Voice): tap to stop; the Mac's Whisper transcribes it into
+    /// the field for editing.
+    private var stopButton: some View {
+        Button {
+            guard let url = recorder.stop(), let oracle = core.pairing.oracle else { return }
+            transcribing = true
+            Task {
+                defer { transcribing = false; try? FileManager.default.removeItem(at: url) }
+                do {
+                    let client = SidecarClient(base: oracle, token: core.pairing.token)
+                    let text = try await client.transcribe(m4a: Data(contentsOf: url))
+                    line += (line.isEmpty || text.isEmpty ? "" : " ") + text
+                } catch { voiceError = error.localizedDescription }
+            }
+        } label: {
+            Group {
+                if transcribing { ProgressView() } else { Image(systemName: "stop.circle.fill").foregroundStyle(.red) }
+            }
             .composerIcon()
-            .foregroundStyle(recorder.isRecording ? .red : .accentColor)
-            .opacity(transcribing ? 0.4 : 1)
-            .accessibilityLabel("Hold to talk")
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    guard !recorder.isRecording, !transcribing else { return }
-                    voiceError = nil
-                    Task { if !(await recorder.start()) { voiceError = "Microphone access is off for juancode." } }
-                }
-                .onEnded { _ in
-                    guard let url = recorder.stop(), let oracle = core.pairing.oracle else { return }
-                    transcribing = true
-                    Task {
-                        defer { transcribing = false; try? FileManager.default.removeItem(at: url) }
-                        do {
-                            let client = SidecarClient(base: oracle, token: core.pairing.token)
-                            let text = try await client.transcribe(m4a: Data(contentsOf: url))
-                            line += (line.isEmpty || text.isEmpty ? "" : " ") + text
-                        } catch { voiceError = error.localizedDescription }
-                    }
-                })
+            .symbolEffect(.pulse, isActive: recorder.isRecording)
+        }
+        .disabled(transcribing)
+        .accessibilityLabel(transcribing ? "Transcribing" : "Stop recording")
     }
 
     /// Per-session push toggle, plus the ntfy topic to subscribe to in the ntfy app.
