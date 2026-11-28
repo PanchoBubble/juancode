@@ -444,7 +444,7 @@ fn transcript_sizes(
     hub.bindings()
         .into_iter()
         .filter_map(|(session, binding)| match binding {
-            Binding::ClaudeJsonl { path } => {
+            Binding::ClaudeJsonl { path } | Binding::CodexJsonl { path } => {
                 let size = std::fs::metadata(&path).ok()?.len();
                 Some((session, size))
             }

@@ -353,7 +353,7 @@ impl ActivityDetector {
                 // thing this signal could do that would make a session read idle
                 // earlier than the screen would have said, and the screen (its prompt,
                 // its quiet, its watchdog) already owns that decision.
-                TranscriptEvent::TurnEnd { .. } => {}
+                TranscriptEvent::TurnEnd { .. } | TranscriptEvent::UsageSnapshot { .. } => {}
             }
         }
         if !agent_worked {

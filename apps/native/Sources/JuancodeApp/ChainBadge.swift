@@ -42,17 +42,18 @@ struct ChainBadge: View {
         if compact {
             Image(systemName: "link")
                 .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(tint)
+                .foregroundStyle(glyph)
                 .padding(.horizontal, 3).padding(.vertical, 2)
-                .background(Capsule().fill(tint.opacity(0.18)))
+                .background(Capsule().fill(fill))
                 .help(help)
         } else {
             HStack(spacing: size / 3) {
                 Image(systemName: "link").font(.system(size: size - 1, weight: .semibold))
+                    .foregroundStyle(glyph)
                 Text(chain.name).font(.system(size: size, weight: .semibold)).lineLimit(1)
             }
             .padding(.horizontal, size * 0.55).padding(.vertical, size / 9)
-            .background(Capsule().fill(tint.opacity(0.18)))
+            .background(Capsule().fill(fill))
             .foregroundStyle(tint)
             .help(help)
         }
@@ -62,6 +63,23 @@ struct ChainBadge: View {
         chain.isActive ? Self.color(for: chain.slug) : .secondary
     }
 
+    private var accent: Color {
+        chain.isActive ? Self.accentColor(for: chain.slug) : .secondary
+    }
+
+    /// Two-tone: the main hue fading into the accent, so chains sharing a main hue
+    /// still look different at a glance.
+    private var fill: LinearGradient {
+        LinearGradient(colors: [tint.opacity(0.22), accent.opacity(0.22)],
+                       startPoint: .leading, endPoint: .trailing)
+    }
+
+    /// The link glyph in both hues, so the pair reads even where the badge is too
+    /// small for its background gradient to show (the sidebar's compact icon).
+    private var glyph: LinearGradient {
+        LinearGradient(colors: [tint, accent], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
     private var help: String {
         let what = chain.isActive ? "Chain \(chain.name)" : "Chain \(chain.name) (closed)"
         return opens ? what + " — click to open it" : what
@@ -69,8 +87,16 @@ struct ChainBadge: View {
 
     /// The slug's color, resolved per appearance so it follows a theme switch live.
     static func color(for slug: String) -> Color {
+        adaptive { ChainPalette.tone(for: slug, dark: $0) }
+    }
+
+    static func accentColor(for slug: String) -> Color {
+        adaptive { ChainPalette.accentTone(for: slug, dark: $0) }
+    }
+
+    private static func adaptive(_ tone: (Bool) -> ChainPalette.Tone) -> Color {
         func ns(_ dark: Bool) -> NSColor {
-            let t = ChainPalette.tone(for: slug, dark: dark)
+            let t = tone(dark)
             return NSColor(calibratedHue: t.hue, saturation: t.saturation,
                            brightness: t.brightness, alpha: 1)
         }

@@ -131,6 +131,7 @@ impl CursorStore for SqliteCursors {
             })?;
         let source = match row.0.as_str() {
             "claude-jsonl" => Source::ClaudeJsonl,
+            "codex-jsonl" => Source::CodexJsonl,
             "opencode-sqlite" => Source::OpencodeSqlite,
             // A row written by a newer build naming a source this one does not have.
             other => {

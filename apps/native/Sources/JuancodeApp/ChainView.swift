@@ -82,6 +82,7 @@ struct ChainTabStrip: View {
 /// How the overview draws a chain: connected cards (the default) or the grouped list.
 enum ChainOverviewMode: String {
     case graph
+    case web
     case list
 
     /// The one `@AppStorage` key both the overview and its entry points write.
@@ -96,6 +97,7 @@ struct ChainOverviewView: View {
     let chain: Chain
     @State private var query = ""
     @AppStorage(ChainOverviewMode.storageKey) private var mode: ChainOverviewMode = .graph
+    @AppStorage("chainGraph.vertical") private var vertical = false
     @AppStorage("chainView.showNotes") private var showNotes = true
 
     /// Summed usage of the chain's sessions and its nested chains' (juancode-8oa5.12).
@@ -140,13 +142,25 @@ struct ChainOverviewView: View {
                 Spacer(minLength: 4)
                 Picker("View", selection: $mode) {
                     Label("Graph", systemImage: "point.3.connected.trianglepath.dotted").tag(ChainOverviewMode.graph)
+                    Label("Web", systemImage: "circle.hexagongrid").tag(ChainOverviewMode.web)
                     Label("List", systemImage: "list.bullet").tag(ChainOverviewMode.list)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
-                .help("Show the chain as connected cards or as a grouped list")
+                .help("Show the chain as connected cards, a web of agents, or a grouped list")
                 .accessibilityLabel("Chain view mode")
+                if mode == .graph {
+                    Picker("Direction", selection: $vertical) {
+                        Image(systemName: "arrow.right").tag(false)
+                        Image(systemName: "arrow.down").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Lay the graph out left to right or top to bottom")
+                    .accessibilityLabel("Graph direction")
+                }
                 Toggle(isOn: $showNotes) { Image(systemName: "sidebar.right") }
                     .toggleStyle(.button)
                     .buttonStyle(.borderless)
@@ -190,6 +204,8 @@ struct ChainOverviewView: View {
 
             if mode == .graph && !(chain.members.isEmpty && model.chains.children(of: chain.slug).isEmpty) {
                 ChainGraphView(chain: chain, query: query)
+            } else if mode == .web && !chain.members.isEmpty {
+                ChainWebView(chain: chain, query: query)
             } else if sections.isEmpty {
                 ContentUnavailableView(
                     chain.members.isEmpty ? "No members yet" : "No matching members",

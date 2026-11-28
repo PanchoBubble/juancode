@@ -121,8 +121,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         case .keepAwake: return KeyBinding(key: "a", shift: true, control: true)
         case .recalcGeometry: return KeyBinding(key: "r", shift: true, control: true)
         case .toggleTerminal: return KeyBinding(key: "t", control: true)
-        // ⌘E opens the selected session's worktree in $EDITOR (nvim) in a tab beside it.
-        case .openEditor: return KeyBinding(key: "e", command: true)
+        // ⌘⇧E opens the selected session's worktree in $EDITOR (nvim) in a tab beside it.
+        case .openEditor: return KeyBinding(key: "e", command: true, shift: true)
         // ⌘\ shows the agent and its editor at once (opening the editor if needed),
         // and back to tabs — the split-pane key in most editors.
         case .splitEditor: return KeyBinding(key: "\\", command: true)
@@ -139,9 +139,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Sendable {
         // vs ⌘C which just toggles the panel's visibility. It was ⌘⇧C until that
         // went to Focus Chains (juancode-2wp).
         case .openChangesForCurrentSession: return KeyBinding(key: "c", command: true, option: true)
-        // ⌘⇧E shows/hides the file-tree sidebar (the Files side-panel tab) — the
-        // explorer convention, next to ⌘E which opens the editor session.
-        case .toggleFileTree: return KeyBinding(key: "e", command: true, shift: true)
+        // Kept unbound after moving ⌘⇧E to the editor.
+        case .toggleFileTree: return KeyBinding(key: "")
         // ⌘⇧G toggles the GitHub view — all open PRs per project (juancode-2t6).
         case .githubView: return KeyBinding(key: "g", command: true, shift: true)
         case .beadsView: return KeyBinding(key: "")
@@ -425,7 +424,10 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
         // the surface you're looking at (⌘N and ⌃N both land here via the monitor).
         if oracle.expanded { oracle.newOracle() } else { model.quickNewSession() }
     case .newSessionSplit: model.quickNewSplitSession()
-    case .newSessionSheet: model.showingNewSession = true
+    case .newSessionSheet:
+        // Same rule as ⌘N: with the Oracle dock open the surface is the Oracle, so
+        // ⌘⇧N asks which provider the new Oracle should run on.
+        if oracle.expanded { oracle.showingNewOracle = true } else { model.showingNewSession = true }
     case .jumpPalette: model.showingJumpPalette = true
     case .quickOpen: model.openQuickOpen()
     case .promptTemplates: model.showingPromptPalette = true
@@ -434,7 +436,10 @@ func performShortcut(_ action: ShortcutAction, model: AppModel, oracle: OracleMo
     case .keepAwake: model.keepAwake.toggle()
     case .recalcGeometry: model.resyncTerminalGeometry()
     case .toggleTerminal: model.toggleBottomTerminal()
-    case .openEditor: model.openEditorForSelection()
+    case .openEditor:
+        if model.panelNavigation.target != .sessions || !model.panelNavigation.performAction("editor") {
+            model.openEditorForSelection()
+        }
     case .splitEditor:
         if let sel = model.selection { model.toggleSplitEditor(sel) }
     case .togglePin:

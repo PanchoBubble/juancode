@@ -101,6 +101,24 @@ import Testing
         #expect(graph.edges.filter(\.isOpen).map(\.id) == ["handoff:h2", "handoff:h3"])
     }
 
+    @Test func topToBottomKeepsAHandoffOnItsSourcesRowAndStepsDispatchesDown() {
+        let a = session("a"), b = session("b"), c = session("c"), d = session("d")
+        let chain = Chain(slug: "c", members: [a, d, c, b])
+        let dispatch = ChainGraphLink(from: a.memberRef, to: d.memberRef, kind: .dispatched)
+        let graph = ChainGraph.build(chain: chain, handoffs: [
+            handoff("h1", .session("a"), .session("b"), chain: "c", at: 1),
+            handoff("h2", .session("b"), .session("c"), chain: "c", at: 2),
+        ], links: [dispatch], handoffsShareRank: true)
+        // a → b → c read sideways in that order despite join order; d drops a row.
+        #expect(graph.groups[0].columns == [[ref(a), ref(b), ref(c)], [ref(d)]])
+        // The run stacks: each newer card overlaps the last, leaving a strip of it.
+        let m = ChainGraphMetrics()
+        let place = ChainGraphPlacement.place(graph, metrics: m, width: 1000, vertical: true)
+        let fa = place.nodes[ref(a)]!, fb = place.nodes[ref(b)]!, fc = place.nodes[ref(c)]!
+        #expect(fb.minX - fa.minX == m.stackPeek && fc.minX - fb.minX == m.stackPeek)
+        #expect(fa.minY == fc.minY && place.nodes[ref(d)]!.minY > fa.maxY)
+    }
+
     @Test func placementKeepsCardsApartAndWrapsUnconnectedToTheWidth() {
         let members = (0..<5).map { session("s\($0)") }
         let chain = Chain(slug: "c", members: members)

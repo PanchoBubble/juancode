@@ -36,4 +36,16 @@ import Testing
         let other = try #require(PrAddress(parsing: "https://github.com/acme/gadgets/pull/42"))
         #expect(a.cwd != other.cwd)
     }
+
+    @Test func matchesTheRepoItsCheckoutsPointAt() throws {
+        let a = try #require(PrAddress(parsing: "https://github.com/Acme/widgets/pull/42"))
+        for ok in ["https://github.com/acme/widgets.git", "git@github.com:acme/widgets.git\n",
+                   "ssh://git@github.com/acme/widgets", "https://github.com/acme/widgets/"] {
+            #expect(a.isRepo(remote: ok), "rejected \(ok)")
+        }
+        for bad in ["https://github.com/acme/gadgets.git", "git@gitlab.com:acme/widgets.git",
+                    "https://github.com/other/widgets", "widgets", ""] {
+            #expect(!a.isRepo(remote: bad), "accepted \(bad)")
+        }
+    }
 }

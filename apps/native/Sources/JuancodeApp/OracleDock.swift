@@ -656,7 +656,7 @@ private struct OracleRailRow: View {
     var body: some View {
         let placeholder = meta.title.hasPrefix(Providers.spec(for: meta.provider).label + " ·")
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            ProviderIcon(provider: meta.provider, tint: statusRailColor,
+            ProviderIcon(provider: meta.provider, tint: meta.provider.brandColor,
                          working: live && activity == .busy)
                 .alignmentGuide(.firstTextBaseline) {
                     $0[VerticalAlignment.center] + NSFont.systemFont(ofSize: 13).capHeight / 2
@@ -743,6 +743,7 @@ private struct OracleRailRow: View {
                             menuHelp: "Oracle actions",
                             onTogglePin: onTogglePin,
                             pinned: pinned,
+                            onKill: onKill,
                             glyphSize: 11)
         }
     }

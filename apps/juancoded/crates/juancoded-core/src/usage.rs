@@ -99,6 +99,29 @@ impl UsageFold {
                 } if model != SYNTHETIC_MODEL => {
                     self.last_model = Some(model.clone());
                 }
+                TranscriptEvent::UsageSnapshot {
+                    usage,
+                    context_tokens,
+                    context_window,
+                    model,
+                } => {
+                    // Snapshots replace totals: rate-limit-only notifications may repeat
+                    // the same counts, and replay after a restart must be idempotent.
+                    next.input_tokens = usage.input as i64;
+                    next.output_tokens = usage.output as i64;
+                    next.cache_read_tokens = usage.cache_read as i64;
+                    next.cache_write_tokens = usage.cache_write as i64;
+                    next.total_tokens = next.input_tokens
+                        + next.output_tokens
+                        + next.cache_read_tokens
+                        + next.cache_write_tokens;
+                    next.context_tokens = Some(*context_tokens as i64);
+                    next.context_window = context_window.map(|n| n as i64);
+                    next.model = model.clone();
+                    next.cost_usd = None;
+                    self.cost_known = false;
+                    changed = true;
+                }
                 TranscriptEvent::Usage { usage, .. } => {
                     if usage.is_zero() {
                         continue;
@@ -433,5 +456,112 @@ mod tests {
         assert_eq!(u.total_tokens, 11);
         assert_eq!(u.cost_usd, None);
         assert_eq!(u.context_window, None);
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+    use juancoded_transcripts::{codex::CodexJsonl, BindRequest, Source, TranscriptSource};
+    use serde_json::json;
+    use std::io::Write;
+
+    fn snapshot(input: u64, output: u64, context: u64) -> String {
+        json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":{"input_tokens":input,"cached_input_tokens":1000,
+                "output_tokens":output,"reasoning_output_tokens":100},
+            "last_token_usage":{"total_tokens":context},"model_context_window":475000
+        }}})
+        .to_string()
+            + "\n"
+    }
+
+    #[test]
+    fn codex_rollout_usage_survives_restart_repeats_and_compaction() {
+        let dir = std::env::temp_dir().join(format!("juancode-codex-{}", std::process::id()));
+        let day = dir.join("2026/11/16");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join("rollout-2026-11-16T10-00-00-session-id.jsonl");
+        let first = snapshot(20000, 2000, 22000);
+        std::fs::write(&path, format!("{{\"type\":\"turn_context\",\"payload\":{{\"model\":\"gpt-6.1-sol\"}}}}\n{first}{first}")).unwrap();
+        let source = CodexJsonl::with_root(&dir);
+        let req = BindRequest {
+            session: "s".into(),
+            provider: "codex".into(),
+            cwd: "/tmp".into(),
+            cli_session_id: Some("session-id".into()),
+        };
+        assert!(source
+            .bind(&BindRequest {
+                provider: "claude".into(),
+                ..req.clone()
+            })
+            .is_none());
+        let binding = source.bind(&req).expect("find the exact session rollout");
+        let (events, cursor) = source.read(&binding, &String::new()).unwrap();
+        let records = |events: Vec<juancoded_transcripts::Emitted>| {
+            events
+                .into_iter()
+                .enumerate()
+                .map(|(seq, e)| TranscriptRecord {
+                    session: "s".into(),
+                    source: Source::CodexJsonl,
+                    seq: seq as u64,
+                    at_ms: e.at_ms,
+                    turn: e.turn,
+                    event: e.event,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut fold = UsageFold::default();
+        let initial = fold.apply(None, &records(events)).unwrap();
+        assert_eq!(
+            initial.total_tokens, 22000,
+            "duplicate snapshots never add twice"
+        );
+        assert_eq!(
+            initial.input_tokens, 19000,
+            "cached tokens are already included in input"
+        );
+        assert_eq!(initial.cache_read_tokens, 1000);
+        assert_eq!(initial.context_tokens, Some(22000));
+        assert_eq!(initial.context_window, Some(475000));
+        assert_eq!(initial.model.as_deref(), Some("gpt-6.1-sol"));
+        assert!(initial.cost_usd.is_none());
+        assert!(source.read(&binding, &cursor).unwrap().0.is_empty());
+
+        // Recreate both source and fold, carrying only the durable cursor and row.
+        let source = CodexJsonl::with_root(&dir);
+        let mut fold = UsageFold::resuming(Some(&initial));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let compacted = snapshot(30000, 3000, 5000);
+        file.write_all(compacted.trim_end().as_bytes()).unwrap();
+        assert!(
+            source.read(&binding, &cursor).unwrap().0.is_empty(),
+            "partial lines wait"
+        );
+        file.write_all(b"\n").unwrap();
+        let (events, cursor) = source.read(&binding, &cursor).unwrap();
+        let next = fold.apply(Some(&initial), &records(events)).unwrap();
+        assert_eq!(next.total_tokens, 33000);
+        assert_eq!(
+            next.context_tokens,
+            Some(5000),
+            "compaction lowers occupancy"
+        );
+        assert_eq!(
+            next.model, initial.model,
+            "model survives the durable cursor"
+        );
+        // A rate-limit notification with no usage must leave the last reading alone.
+        file.write_all(
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null}}\n",
+        )
+        .unwrap();
+        assert!(source.read(&binding, &cursor).unwrap().0.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

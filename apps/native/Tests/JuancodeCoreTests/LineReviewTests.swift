@@ -110,6 +110,7 @@ final class LineReviewTests: XCTestCase {
                           excerpt: [" one", "-two", "+TWO"], text: "why uppercase?"),
             ReviewComment(id: "2", path: "b.md", startLabel: "5 (old)", endLabel: "5 (old)",
                           endKey: "o5", excerpt: ["-gone"], text: "keep this\nplease"),
+            .general("split this PR", id: "3"),
         ]
         let expected = """
         Review comments on my diff (working tree vs HEAD). Address each one:
@@ -128,6 +129,9 @@ final class LineReviewTests: XCTestCase {
         ```
         keep this
         please
+
+        3. General
+        split this PR
         """
         XCTAssertEqual(formatReview(comments, baseLabel: "working tree vs HEAD"), expected)
     }

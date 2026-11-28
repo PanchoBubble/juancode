@@ -47,6 +47,8 @@ pub struct FakeChild {
     model: Mutex<TerminalModel>,
     /// Whether the child paints what it is sent, the way a TUI's input box does.
     echoes: bool,
+    /// Codex replaces a large paste with a chip rather than literal prompt text.
+    pub collapses_paste: AtomicBool,
     /// A child that takes the paste and does nothing at all with the Enter, which
     /// is the shape of the bug this engine exists for: the prompt sits typed and
     /// unsent, and the delivery has to say so rather than report a submission.
@@ -79,6 +81,7 @@ impl FakeChild {
             writes: Mutex::new(Vec::new()),
             model: Mutex::new(model),
             echoes,
+            collapses_paste: AtomicBool::new(false),
             swallows_enter: AtomicBool::new(false),
             running: AtomicBool::new(true),
             busy: AtomicBool::new(false),
@@ -153,7 +156,11 @@ impl SessionsApi for FakeChild {
             // was pasted, which is the bug being tested for rather than a fixture
             // detail.
             model.feed(b"\x1b[24;1H");
-            model.feed(data);
+            if self.collapses_paste.load(Ordering::Relaxed) {
+                model.feed(b"[Pasted Content 1452 chars]");
+            } else {
+                model.feed(data);
+            }
             model.feed(b"\r\n");
         }
         Ok(())

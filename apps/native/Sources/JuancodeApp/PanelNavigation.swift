@@ -57,7 +57,26 @@ final class PanelNavigation {
     var selectedActionLabel: String? { currentRow?.actions.first { $0.id == cursor.actionID }?.label }
     private var currentRow: PanelNavigationRow? { rows.first { $0.id == cursor.rowID } }
 
+    @discardableResult
+    func performAction(_ id: String) -> Bool {
+        guard let action = currentRow?.actions.first(where: { $0.id == id }) else { return false }
+        action.perform()
+        return true
+    }
+
     func handle(_ key: UInt16) -> Bool {
+        if target == .sessions {
+            let action: String?
+            switch key {
+            case 45: action = "new" // n
+            case 8: action = "close" // c
+            case 2: action = "delete" // d
+            case 14: action = "rename" // e
+            case 35: action = "pin" // p
+            default: action = nil
+            }
+            if let action { _ = performAction(action); return true }
+        }
         switch key {
         case 38, 125: cursor.moveRow(1) // j / ↓
         case 40, 126: cursor.moveRow(-1) // k / ↑

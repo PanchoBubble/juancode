@@ -4351,6 +4351,17 @@ mod tests {
             &mut fanout,
         );
         let child = created_id(&sent);
+        // The dispatcher is recorded on the child, on the wire and in the registry.
+        assert!(sent
+            .iter()
+            .any(|f| matches!(f, ServerMessage::Created { session }
+            if session.parent_session_id.as_deref() == Some(oracle.as_str()))));
+        assert_eq!(
+            wire.sessions()
+                .meta(&child)
+                .and_then(|m| m.parent_session_id),
+            Some(oracle.clone())
+        );
         assert_eq!(
             chain_book(&wire)
                 .chain_of(ChainMemberKind::Session, &child)
@@ -4464,6 +4475,10 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("no created in {sent:?}"));
             ids.push(session.id.clone());
+            assert_eq!(
+                session.parent_session_id, None,
+                "an unknown source is not a parent"
+            );
             let chains = chain_book(&wire);
             let slug = chains
                 .chain_of(ChainMemberKind::Session, &session.id)

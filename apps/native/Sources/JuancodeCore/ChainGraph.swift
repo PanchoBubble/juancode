@@ -48,6 +48,8 @@ public enum ChainGraphEdgeKind: Equatable, Sendable {
     /// A nested chain's sub-orchestrator names this member as the session that
     /// dispatched it (its `parentSessionId`): session → nested chain.
     case dispatchesChain
+    /// A session dispatched another (the child's `parentSessionId`): parent → child.
+    case dispatched
 
     public var title: String {
         switch self {
@@ -56,6 +58,7 @@ public enum ChainGraphEdgeKind: Equatable, Sendable {
         case .watchesPr: return "Watches PR"
         case .tracksTicket: return "Tracks ticket"
         case .dispatchesChain: return "Dispatched chain"
+        case .dispatched: return "Dispatched"
         }
     }
 }
@@ -103,6 +106,7 @@ public struct ChainGraphEdge: Equatable, Sendable, Identifiable {
         case .watchesPr: return "watches"
         case .tracksTicket: return "tracks"
         case .dispatchesChain: return "dispatched"
+        case .dispatched: return "dispatched"
         }
     }
 
@@ -110,7 +114,7 @@ public struct ChainGraphEdge: Equatable, Sendable, Identifiable {
     public var handoff: ChainHandoff? {
         switch kind {
         case let .handoff(h), let .handoffIssue(h): return h
-        case .watchesPr, .tracksTicket, .dispatchesChain: return nil
+        case .watchesPr, .tracksTicket, .dispatchesChain, .dispatched: return nil
         }
     }
 
@@ -144,9 +148,12 @@ public struct ChainGraph: Equatable, Sendable {
     /// Build the graph for `chain`. `handoffs` may include other chains' records; only
     /// this chain's are used. `links` are the app's explicit non-handoff links;
     /// `subchains` the chains nested directly under it, each one node after the members.
+    /// `handoffsShareRank` keeps a handoff's target on its source's rank, right after it,
+    /// so a goal passed along reads sideways while dispatches step down (the ↓ layout).
     public static func build(chain: Chain, handoffs: [ChainHandoff],
                              links: [ChainGraphLink] = [],
-                             subchains: [ChainGraphSubchain] = []) -> ChainGraph {
+                             subchains: [ChainGraphSubchain] = [],
+                             handoffsShareRank: Bool = false) -> ChainGraph {
         let memberIds = chain.members.map { ChainGraphNodeID.member($0.memberRef) }
             + subchains.map { ChainGraphNodeID.chain($0.slug) }
         let memberSet = Set(memberIds)
@@ -218,7 +225,8 @@ public struct ChainGraph: Equatable, Sendable {
             let nodes = componentNodes[root] ?? []
             let inGroup = Set(nodes)
             let groupEdges = edges.filter { inGroup.contains($0.from) }
-            return ChainGraphGroup(columns: columns(nodes, edges: groupEdges), edges: groupEdges)
+            return ChainGraphGroup(columns: columns(nodes, edges: groupEdges, handoffsShareRank: handoffsShareRank),
+                                   edges: groupEdges)
         }
         let unconnected = order.indices.filter { !touched.contains($0) }.map { order[$0] }
         return ChainGraph(groups: groups, unconnected: unconnected)
@@ -227,23 +235,28 @@ public struct ChainGraph: Equatable, Sendable {
     /// Longest-path columns over the group's edges, ignoring self-loops and any edge
     /// that would close a cycle (a handoff back to an earlier owner still draws, it just
     /// does not push its target right). Within a column, nodes keep join order.
-    static func columns(_ nodes: [ChainGraphNodeID],
-                        edges: [ChainGraphEdge]) -> [[ChainGraphNodeID]] {
+    static func columns(_ nodes: [ChainGraphNodeID], edges: [ChainGraphEdge],
+                        handoffsShareRank: Bool = false) -> [[ChainGraphNodeID]] {
         var rank = Dictionary(uniqueKeysWithValues: nodes.map { ($0, 0) })
         // Forward edges only: an edge counts when its source is reachable before its
         // target in a DFS from the first node in join order, which drops back edges.
-        var forward: [ChainGraphNodeID: [ChainGraphNodeID]] = [:]
-        for e in edges where e.from != e.to { forward[e.from, default: []].append(e.to) }
+        // `step` is how many ranks the edge moves its target: 0 for a sideways handoff.
+        var forward: [ChainGraphNodeID: [(to: ChainGraphNodeID, step: Int)]] = [:]
+        for e in edges where e.from != e.to {
+            var sideways = false
+            if handoffsShareRank, case .handoff = e.kind { sideways = true }
+            forward[e.from, default: []].append((e.to, sideways ? 0 : 1))
+        }
         var state: [ChainGraphNodeID: Int] = [:]  // 1 = on stack, 2 = done
-        var dag: [(ChainGraphNodeID, ChainGraphNodeID)] = []
+        var dag: [(ChainGraphNodeID, ChainGraphNodeID, Int)] = []
         func visit(_ n: ChainGraphNodeID) {
             state[n] = 1
-            for m in forward[n] ?? [] {
+            for (m, step) in forward[n] ?? [] {
                 switch state[m] {
                 case 1: continue  // back edge
-                case 2: dag.append((n, m))
+                case 2: dag.append((n, m, step))
                 default:
-                    dag.append((n, m))
+                    dag.append((n, m, step))
                     visit(m)
                 }
             }
@@ -256,15 +269,29 @@ public struct ChainGraph: Equatable, Sendable {
         // Relax in DAG order; bounded by the node count since there are no cycles left.
         for _ in 0..<max(nodes.count, 1) {
             var changed = false
-            for (a, b) in dag where rank[b, default: 0] < rank[a, default: 0] + 1 {
-                rank[b] = rank[a, default: 0] + 1
+            for (a, b, step) in dag where rank[b, default: 0] < rank[a, default: 0] + step {
+                rank[b] = rank[a, default: 0] + step
                 changed = true
             }
             if !changed { break }
         }
+        // A sideways handoff's target follows its source within the rank (first one wins).
+        var after: [ChainGraphNodeID: [ChainGraphNodeID]] = [:]
+        var placedAfter = Set<ChainGraphNodeID>()
+        for n in nodes {
+            for (a, b, step) in dag where step == 0 && b == n && rank[a] == rank[b] {
+                after[a, default: []].append(b)
+                placedAfter.insert(b)
+                break
+            }
+        }
         let width = (rank.values.max() ?? 0) + 1
         var columns = Array(repeating: [ChainGraphNodeID](), count: width)
-        for n in nodes { columns[rank[n, default: 0]].append(n) }
+        func emit(_ n: ChainGraphNodeID) {
+            columns[rank[n, default: 0]].append(n)
+            for m in after[n] ?? [] { emit(m) }
+        }
+        for n in nodes where !placedAfter.contains(n) { emit(n) }
         return columns.filter { !$0.isEmpty }
     }
 }
@@ -281,10 +308,14 @@ public struct ChainGraphMetrics: Equatable, Sendable {
     public var groupHeader: CGFloat
     public var groupGap: CGFloat
 
+    /// How much of each earlier card shows when a handoff run stacks (the ↓ layout).
+    public var stackPeek: CGFloat
+
     public init(card: CGSize = CGSize(width: 228, height: 96), columnGap: CGFloat = 112,
                 rowGap: CGFloat = 28, groupPadding: CGFloat = 16, groupHeader: CGFloat = 26,
-                groupGap: CGFloat = 22) {
+                groupGap: CGFloat = 22, stackPeek: CGFloat = 40) {
         self.card = card
+        self.stackPeek = stackPeek
         self.columnGap = columnGap
         self.rowGap = rowGap
         self.groupPadding = groupPadding
@@ -304,12 +335,14 @@ public struct ChainGraphPlacement: Equatable, Sendable {
     public var nodes: [ChainGraphNodeID: CGRect]
     public var boxes: [Box]
     public var size: CGSize
+    /// Groups flow top to bottom (ranks are rows) instead of left to right.
+    public var vertical = false
 
-    /// Connected groups stack top to bottom, each laid out left to right by column;
-    /// the unconnected members wrap into as many columns as `width` holds (at least
+    /// Connected groups stack top to bottom, each laid out left to right by column
+    /// (or, `vertical`, top to bottom by rank with siblings side by side); the unconnected members wrap into as many columns as `width` holds (at least
     /// one), so a narrow window scrolls down rather than sideways where it can.
     public static func place(_ graph: ChainGraph, metrics m: ChainGraphMetrics,
-                             width: CGFloat) -> ChainGraphPlacement {
+                             width: CGFloat, vertical: Bool = false) -> ChainGraphPlacement {
         var nodes: [ChainGraphNodeID: CGRect] = [:]
         var boxes: [Box] = []
         var y: CGFloat = 0
@@ -317,7 +350,46 @@ public struct ChainGraphPlacement: Equatable, Sendable {
         let stepX = m.card.width + m.columnGap
         let stepY = m.card.height + m.rowGap
 
-        for (gi, group) in graph.groups.enumerated() {
+        for (gi, group) in graph.groups.enumerated() where vertical {
+            // A card a handoff passed straight on from the card before it stacks over that
+            // card, leaving a `stackPeek` strip, so a goal's run of owners stays narrow.
+            let handedOn = Set(group.edges.compactMap { e -> String? in
+                if case .handoff = e.kind { return "\(e.from.key)>\(e.to.key)" }
+                return nil
+            })
+            let xs = group.columns.map { rank -> (offsets: [CGFloat], width: CGFloat) in
+                var offsets: [CGFloat] = []
+                var x: CGFloat = 0
+                for (i, n) in rank.enumerated() {
+                    if i > 0 {
+                        x += handedOn.contains("\(rank[i - 1].key)>\(n.key)")
+                            ? m.stackPeek : m.card.width + m.rowGap
+                    }
+                    offsets.append(x)
+                }
+                return (offsets, rank.isEmpty ? 0 : x + m.card.width)
+            }
+            let innerW = xs.map(\.width).max() ?? m.card.width
+            let top = y + m.groupHeader + m.groupPadding
+            let stepRank = m.card.height + m.columnGap
+            for (ri, rank) in group.columns.enumerated() {
+                // Narrower ranks centre against the widest one.
+                let offset = (innerW - xs[ri].width) / 2
+                for (si, n) in rank.enumerated() {
+                    nodes[n] = CGRect(x: m.groupPadding + offset + xs[ri].offsets[si],
+                                      y: top + CGFloat(ri) * stepRank,
+                                      width: m.card.width, height: m.card.height)
+                }
+            }
+            let ranks = CGFloat(group.columns.count)
+            let w = 2 * m.groupPadding + innerW
+            let h = m.groupHeader + 2 * m.groupPadding + ranks * m.card.height + max(ranks - 1, 0) * m.columnGap
+            boxes.append(Box(group: gi, frame: CGRect(x: 0, y: y, width: w, height: h)))
+            maxX = max(maxX, w)
+            y += h + m.groupGap
+        }
+
+        for (gi, group) in graph.groups.enumerated() where !vertical {
             let rows = group.columns.map(\.count).max() ?? 1
             let innerH = CGFloat(rows) * m.card.height + CGFloat(max(rows - 1, 0)) * m.rowGap
             // Self-loops draw above their card; leave room in the header band.
@@ -362,6 +434,7 @@ public struct ChainGraphPlacement: Equatable, Sendable {
             y += h + m.groupGap
         }
         return ChainGraphPlacement(nodes: nodes, boxes: boxes,
-                                   size: CGSize(width: maxX, height: max(y - m.groupGap, 0)))
+                                   size: CGSize(width: maxX, height: max(y - m.groupGap, 0)),
+                                   vertical: vertical)
     }
 }

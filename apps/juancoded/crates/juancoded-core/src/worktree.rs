@@ -760,7 +760,11 @@ const MAX_SCAN_DEPTH: usize = 2;
 /// failure to link one path is not a failure to isolate.
 pub fn link_node_modules(source_root: &str, worktree_path: &str) -> Vec<String> {
     let mut linked = Vec::new();
-    for rel in node_modules_paths(source_root) {
+    let paths = node_modules_paths(source_root);
+    if !paths.is_empty() {
+        exclude_node_modules_links(worktree_path);
+    }
+    for rel in paths {
         let source = Path::new(source_root).join(&rel);
         let dest = Path::new(worktree_path).join(&rel);
         let Some(parent) = dest.parent() else {
@@ -779,6 +783,31 @@ pub fn link_node_modules(source_root: &str, worktree_path: &str) -> Vec<String> 
         }
     }
     linked
+}
+
+/// A `.gitignore` `node_modules/` matches only directories, so the links above showed
+/// as untracked. Every slot then read as dirty: the pool never reclaimed or parked
+/// one and cut a new slot per session instead. The bare pattern, in the repo's
+/// shared `info/exclude`, covers links and directories in every worktree.
+fn exclude_node_modules_links(worktree_path: &str) {
+    let Some(common) = git(
+        worktree_path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) else {
+        return;
+    };
+    let exclude = Path::new(common.trim()).join("info").join("exclude");
+    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if current.lines().any(|l| l.trim() == "node_modules") {
+        return;
+    }
+    let _ = std::fs::create_dir_all(exclude.parent().unwrap_or(Path::new(".")));
+    let sep = if current.is_empty() || current.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::write(&exclude, format!("{current}{sep}node_modules\n"));
 }
 
 /// Repo-relative paths of the `node_modules` directories under `root`, to
@@ -1248,6 +1277,10 @@ mod tests {
             .join("apps/oracle-mcp/node_modules")
             .symlink_metadata()
             .is_ok());
+        // A link that shows as untracked makes the slot dirty, and the pool never
+        // parks or reclaims a dirty slot.
+        let status = git(&made.path, &["status", "--porcelain"]).unwrap();
+        assert!(status.trim().is_empty(), "{status}");
         std::fs::remove_dir_all(&parent).ok();
     }
 }

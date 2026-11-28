@@ -30,6 +30,22 @@ const event = (state: NotificationEvent["state"], notify = true): NotificationEv
 });
 
 describe("durable session notifications", () => {
+  it("keeps an empty idle dispatch subscribed until a later result", async () => {
+    const { store, output, deliver } = make();
+    output.mockResolvedValueOnce("");
+    await store.subscribe({ subscriber: "parent", targetType: "dispatch", targetId: "dispatch-1" });
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    expect(await store.list("parent")).toHaveLength(1);
+    expect(deliver.mock.calls[0]![1]).toContain("oracle_session_transcript");
+    await store.publish(event("idle"));
+    expect(deliver).toHaveBeenCalledTimes(1);
+    await store.publish(event("busy"));
+    await store.publish(event("idle"));
+    expect(await store.list("parent")).toHaveLength(0);
+    expect((await store.inbox("parent"))[0]!.output).toBe("The final answer");
+  });
+
   it("supports all transitions or completion only, intersected with explicit states", async () => {
     const { store } = make();
     for (const mode of ["all", "done"] as const)

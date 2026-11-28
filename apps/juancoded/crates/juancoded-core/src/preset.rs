@@ -11,6 +11,7 @@
 //!   defined in their own config.
 //! - kimi takes the **name** too, through its same `--agent <name>` — on START only,
 //!   because kimi does not allow `--agent` to combine with `--session` on a resume.
+//! - antigravity (`agy`) takes the **name** through `--agent <name>` as well, on START only.
 //!
 //! That asymmetry is what keeps this inside the prime directive: for the CLIs that
 //! own the concept we select what the user already configured, and we never author a
@@ -191,7 +192,11 @@ impl PresetStore {
 pub fn preset_needs_body(provider: ProviderId) -> bool {
     match provider {
         ProviderId::Claude => true,
-        ProviderId::Codex | ProviderId::Opencode | ProviderId::Kimi => false,
+        ProviderId::Codex
+        | ProviderId::Opencode
+        | ProviderId::Kimi
+        | ProviderId::Antigravity
+        | ProviderId::Cursor => false,
     }
 }
 

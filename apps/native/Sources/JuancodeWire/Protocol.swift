@@ -9,6 +9,8 @@ public enum ProviderId: String, Codable, Sendable, CaseIterable {
     case codex
     case opencode
     case kimi
+    case antigravity
+    case cursor
 }
 
 /// Inferred live activity of a running session. Derived from the pty stream
@@ -47,11 +49,13 @@ public struct SessionUsage: Codable, Sendable, Equatable {
     public var costUsd: Double?
     /// What the *live* conversation currently occupies of the model's window
     /// (juancode-lncw): the newest billed turn's input + cache read + cache write,
-    /// which is exactly what the next request has to re-send. Distinct from the
+    /// which is exactly what the next request has to re-send. Codex reports the
+    /// latest request total (input + output) directly. Distinct from the
     /// cumulative `inputTokens`, which only ever grows. Nil until a turn lands, and
     /// on providers whose transcript doesn't report it.
     public var contextTokens: Int?
-    /// The window `contextTokens` is measured against, from `ModelPricing`. Nil for
+    /// The window `contextTokens` is measured against, reported by the CLI when
+    /// available (Codex), otherwise from `ModelPricing`. Nil for
     /// a model we have no window for — the percentage is then not computable, which
     /// is deliberately different from 0%.
     public var contextWindow: Int?

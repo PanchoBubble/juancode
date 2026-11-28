@@ -55,8 +55,8 @@ async fn a_renamed_session_keeps_its_name_when_the_cli_repaints_its_window_title
     // The whole bug, in one test. Before the pin, the second half of this took the
     // name away within seconds of the first.
     let harness = Harness::new("set-meta-pin");
-    let mut events = harness.sessions.subscribe();
     let id = harness.create("/tmp", 80, 24, DESKTOP).await;
+    let mut events = harness.sessions.subscribe();
 
     // The CLI names itself first, which is the ordinary case and must still work.
     paint_title_and_settle(&harness, &id, "claude in tmp", "cli named it").await;
@@ -206,8 +206,8 @@ async fn an_exited_session_can_still_be_renamed_and_archived() {
     // with no pty would refuse the common case. Renaming is a fact about the row too,
     // not about the process behind it.
     let harness = Harness::new("set-meta-exited");
-    let mut events = harness.sessions.subscribe();
     let id = harness.create("/tmp", 80, 24, DESKTOP).await;
+    let mut events = harness.sessions.subscribe();
     harness.sessions.kill(&id).expect("kill");
     harness::wait_for_exit(&mut events, &id).await;
 

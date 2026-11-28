@@ -44,9 +44,12 @@ struct DiffReviewPanel: View {
         var text = ""
     }
 
+    /// A PR conversation comment, or (as `generalDraft`) a general comment for the
+    /// agent, new or replacing staged comment `editId`.
     private struct GlobalCommentDraft: Equatable {
         var serial: Int
         var text = ""
+        var editId: String?
     }
 
     /// A comment being written: over rows `from...to`, or replacing comment `editId`.
@@ -129,6 +132,8 @@ struct DiffReviewPanel: View {
     /// Threads with a reply or a resolve on its way to GitHub.
     @State private var threadBusy: Set<String> = []
     @State private var globalCommentDraft: GlobalCommentDraft?
+    /// `C`: a general comment, on the change and no line.
+    @State private var generalDraft: GlobalCommentDraft?
     @State private var globalCommentSerial = 0
     @State private var postingGlobalComment = false
 
@@ -143,6 +148,7 @@ struct DiffReviewPanel: View {
     private var snapshot: DiffReviewModel.Snapshot? { review.snapshot(sessionId) }
     private var files: [DiffFile] { snapshot?.files ?? [] }
     private var allComments: [ReviewComment] { review.comments(sessionId) }
+    private var generalComments: [ReviewComment] { allComments.filter(\.isGeneral) }
     private var file: DiffFile? { files.first { $0.path == selectedPath } }
     private var fileComments: [ReviewComment] {
         guard let path = selectedPath else { return [] }
@@ -250,14 +256,14 @@ struct DiffReviewPanel: View {
         .background {
             ReviewKeyCatcher(token: keyToken &+ model.diffReviewFocusToken,
                              enabled: !model.oracleDockExpanded && draft == nil && prompt == nil
-                                 && reply == nil && globalCommentDraft == nil,
+                                 && reply == nil && globalCommentDraft == nil && generalDraft == nil,
                              onKey: handle).frame(width: 0, height: 0)
         }
         .onAppear {
             if snapshot == nil { model.loadDiffReview(sessionId) }
             syncSelection()
         }
-        .onDisappear { saveDraft() }
+        .onDisappear { saveDraft(); saveGeneralDraft() }
         .onChange(of: snapshot) { _, _ in syncSelection() }
         // The Worktree viewer and this review are one review state: the file open here
         // is the file open there.
@@ -265,7 +271,8 @@ struct DiffReviewPanel: View {
             guard let checkout = worktreeCheckout, let path, path != prGlobalCommentsPath else { return }
             model.worktreeViews.update(checkout) { $0.select(path) }
         }
-        .onChange(of: draft == nil && prompt == nil && reply == nil && globalCommentDraft == nil) { _, closed in
+        .onChange(of: draft == nil && prompt == nil && reply == nil && globalCommentDraft == nil
+                  && generalDraft == nil) { _, closed in
             if closed { keyToken &+= 1 }
         }
         .onChange(of: promptText) { _, _ in promptTextChanged() }
@@ -623,8 +630,68 @@ struct DiffReviewPanel: View {
 
     // MARK: - Diff
 
-    @ViewBuilder
     private var diffPane: some View {
+        VStack(spacing: 0) {
+            generalCommentsStrip
+            filePane
+        }
+    }
+
+    /// Staged general comments (`C`) and their editor, above whatever file is open.
+    @ViewBuilder
+    private var generalCommentsStrip: some View {
+        if generalDraft != nil || !generalComments.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(generalComments) { c in
+                    if generalDraft?.editId == c.id { generalEditor } else { generalCommentRow(c) }
+                }
+                if generalDraft != nil, generalDraft?.editId == nil { generalEditor }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.appPanel)
+            Divider()
+        }
+    }
+
+    private func generalCommentRow(_ c: ReviewComment) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "text.bubble").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(c.text).font(.system(size: 12)).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { openGeneralDraft(editing: c) } label: { Image(systemName: "pencil") }
+                .buttonStyle(.borderless).help("Edit").clickCursor()
+            Button { review.delete(c.id, in: sessionId); keyToken &+= 1 } label: { Image(systemName: "xmark") }
+                .buttonStyle(.borderless).help("Delete").clickCursor()
+        }
+    }
+
+    private var generalEditor: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("General comment, not on any line").font(.system(size: 10)).foregroundStyle(.secondary)
+            ReviewDraftEditor(
+                text: Binding(get: { generalDraft?.text ?? "" }, set: { generalDraft?.text = $0 }),
+                focusToken: generalDraft?.serial ?? 0,
+                onSubmit: saveGeneralDraft,
+                onSend: sendReview,
+                onCancel: { generalDraft = nil })
+                .frame(height: 64)
+                .background(Color.appSurface)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accentColor.opacity(0.6)))
+            HStack(spacing: 8) {
+                Button("Comment") { saveGeneralDraft() }
+                    .controlSize(.small)
+                    .disabled((generalDraft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .clickCursor()
+                Button("Cancel") { generalDraft = nil }.controlSize(.small).clickCursor()
+                Text("⏎ save · ⌘⏎ save & send · ⇧⏎ newline · esc cancel")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var filePane: some View {
         if isShowingGlobalComments {
             globalCommentsPane
         } else {
@@ -1069,8 +1136,8 @@ struct DiffReviewPanel: View {
             Text(prompt != nil
                  ? "⏎ accept · esc cancel"
                  : isShowingGlobalComments
-                    ? "⏎ / gcc add PR comment · gt/gT file · R refresh · ␣n tree · q / esc esc close"
-                    : "h/l move · w/b/e word · 0/$ line · gcc comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close")
+                    ? "⏎ / gcc add PR comment · C general comment · gt/gT file · R refresh · ␣n tree · q / esc esc close"
+                    : "h/l move · w/b/e word · 0/$ line · gcc comment · C general comment · r GitHub comment · V select · ]c/[c hunk · gt/gT file · ]d/[d comment · dd delete · ⌃P/␣ff files · ␣fg grep · / ? n N search · s send · ␣n tree · q / esc esc close")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.head)
         }
@@ -1079,7 +1146,7 @@ struct DiffReviewPanel: View {
     }
 
     private var modeName: String {
-        if draft != nil || reply != nil || globalCommentDraft != nil { return "INSERT" }
+        if draft != nil || reply != nil || globalCommentDraft != nil || generalDraft != nil { return "INSERT" }
         if case .search = prompt { return "SEARCH" }
         if prompt != nil { return "FIND" }
         if focus == .tree { return "TREE" }
@@ -1087,7 +1154,7 @@ struct DiffReviewPanel: View {
     }
 
     private var modeColor: Color {
-        if draft != nil || reply != nil || globalCommentDraft != nil { return .green }
+        if draft != nil || reply != nil || globalCommentDraft != nil || generalDraft != nil { return .green }
         if prompt != nil { return .purple }
         if focus == .tree { return .blue }
         return isVisual ? .orange : .secondary
@@ -1233,6 +1300,10 @@ struct DiffReviewPanel: View {
             if key == .escape { globalCommentDraft = nil }
             return true
         }
+        guard generalDraft == nil else {
+            if key == .escape { generalDraft = nil }
+            return true
+        }
         guard let command = parser.feed(key, visual: isVisual && focus == .diff) else { return true }
         if command == .close, key == .escape {
             model.closeDiffReview()
@@ -1251,6 +1322,8 @@ struct DiffReviewPanel: View {
             searchStep(next: command == .searchNext)
         case .send:
             sendReview()
+        case .generalComment:
+            openGeneralDraft()
         case .toggleTree:
             treeShown.toggle()
             if !treeShown { focus = .diff }
@@ -1351,7 +1424,7 @@ struct DiffReviewPanel: View {
                let line = rf.rows[i].line {
                 cursorColumn = reviewColumn(in: line.text, from: cursorColumn, command: command)
             }
-        case .send, .toggleTree, .focusTree, .focusDiff, .refresh,
+        case .send, .generalComment, .toggleTree, .focusTree, .focusDiff, .refresh,
              .findFiles, .findText, .searchForward, .searchBackward, .searchNext, .searchPrev:
             break
         }
@@ -1763,6 +1836,27 @@ struct DiffReviewPanel: View {
         parser.reset()
     }
 
+    private func openGeneralDraft(editing c: ReviewComment? = nil) {
+        if draft != nil { saveDraft() }
+        draftSerial &+= 1
+        generalDraft = GlobalCommentDraft(serial: draftSerial, text: c?.text ?? "", editId: c?.id)
+        parser.reset()
+    }
+
+    private func saveGeneralDraft() {
+        guard let d = generalDraft else { return }
+        generalDraft = nil
+        let text = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if let id = d.editId {
+            review.edit(id, text: text, in: sessionId)
+            return
+        }
+        review.add(.general(text), to: sessionId)
+        let n = allComments.count
+        review.say("\(n) comment\(n == 1 ? "" : "s") staged — s sends", in: sessionId)
+    }
+
     private func beginEdit(_ c: ReviewComment) {
         guard !contextLoading, let rf = rendered else { return }
         let at = reviewRowIndex(forKey: c.endKey, in: rf.rows) ?? 0
@@ -1800,6 +1894,7 @@ struct DiffReviewPanel: View {
     /// from the editor sends it along with the rest.
     private func sendReview() {
         if draft != nil { saveDraft() }
+        if generalDraft != nil { saveGeneralDraft() }
         model.sendDiffReview(sessionId)
         keyToken &+= 1
     }

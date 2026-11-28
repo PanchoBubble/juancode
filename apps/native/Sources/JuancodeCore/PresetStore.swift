@@ -13,6 +13,7 @@ import Foundation
 ///   defined in their own config.
 /// - kimi takes the **name** too, through its same `--agent <name>` — on START only,
 ///   because kimi does not allow `--agent` to combine with `--session` on a resume.
+/// - antigravity (`agy`) takes the **name** through `--agent <name>` too, on START only.
 ///
 /// That asymmetry is deliberate and is what keeps this inside the prime directive: for
 /// the CLIs that own the concept we select what the user already configured, and we
@@ -128,7 +129,7 @@ extension ProviderId {
     var presetNeedsBody: Bool {
         switch self {
         case .claude: return true
-        case .codex, .opencode, .kimi: return false
+        case .codex, .opencode, .kimi, .antigravity, .cursor: return false
         }
     }
 }

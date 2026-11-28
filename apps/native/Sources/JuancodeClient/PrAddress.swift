@@ -47,6 +47,18 @@ public struct PrAddress: Equatable, Sendable {
         self.init(parsing: String(cwd.dropFirst(Self.cwdPrefix.count)))
     }
 
+    /// Whether a git remote URL (`https://host/o/r(.git)` or `git@host:o/r(.git)`) is this PR's repo.
+    public func isRepo(remote: String) -> Bool {
+        var r = remote.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while r.hasSuffix("/") { r.removeLast() }
+        if r.hasSuffix(".git") { r.removeLast(4) }
+        let parts = r.split(whereSeparator: { $0 == "/" || $0 == ":" }).map(String.init)
+        guard parts.count >= 3 else { return false }
+        let hostName = host.split(separator: ":").first.map(String.init)?.lowercased() ?? host
+        return parts[parts.count - 2] == owner.lowercased() && parts[parts.count - 1] == repo.lowercased()
+            && parts.dropLast(2).contains { $0 == hostName || $0.hasSuffix("@" + hostName) }
+    }
+
     /// Whether `cwd` is the sentinel — a PR with no checkout behind it.
     public static func isRemote(cwd: String) -> Bool { cwd.hasPrefix(cwdPrefix) }
 }

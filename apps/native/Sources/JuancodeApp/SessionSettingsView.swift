@@ -30,6 +30,7 @@ struct SessionSettingsView: View {
     /// toggle off and on, like `budget`.
     @AppStorage(contextHandoffTokensKey) private var handoffTokens = ContextPressure.defaultHandoffTokens
     @State private var handoffDraft = ContextPressure.defaultHandoffTokens
+    @AppStorage(PrQuickPrompt.key) private var quickPrompt = PrQuickPrompt.defaultText
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -121,6 +122,19 @@ struct SessionSettingsView: View {
 
                 Divider().padding(.vertical, 4)
 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("PR saved prompt")
+                    TextEditor(text: $quickPrompt)
+                        .font(.system(size: 12))
+                        .frame(height: 54)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.3)))
+                    Text("Sent by the paperplane on a PR row in the GitHub panel: to the PR's tracking agent if it has one, else to a fresh Claude session.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider().padding(.vertical, 4)
+
                 // Notification routing (juancode-xac): a Slack-compatible JSON POSTed
                 // on turn-end / needs-input. Empty = off; nothing sends without a URL.
                 // The POST is the daemon's, so this field writes the daemon's own
@@ -150,7 +164,7 @@ struct SessionSettingsView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
         }
-        .frame(width: 520, height: 620)
+        .frame(width: 520, height: 720)
         .onAppear {
             if enabled { minutes = model.autoCloseIdleMinutes }
             if budgetEnabled { budget = model.costBudgetUsd }

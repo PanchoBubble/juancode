@@ -391,7 +391,7 @@ extension AppModel {
         let review = diffReview
         let staged = review.comments(id)
         guard !staged.isEmpty else {
-            review.say("No comments yet: gcc on a line, or V then gc", isError: true, in: id)
+            review.say("No comments yet: gcc on a line, V then gc, or C for a general one", isError: true, in: id)
             return
         }
         guard !review.sending.contains(id) else { return }
@@ -483,9 +483,7 @@ extension AppModel {
         let sent = Set(staged.map(\.id))
         let delivery = prReviewDelivery(id)
         if delivery == .chooseSession {
-            review.setSending(false, id)
-            review.say("Choose an agent session from the Agent menu, then send again. Your comments are kept.",
-                       isError: true, in: id)
+            await startAgentReview(id, target: target, sent: sent, prompt: prompt)
             return
         }
         review.say("Queueing \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
@@ -494,7 +492,7 @@ extension AppModel {
         case .session(let sessionId):
             guard diffReviewAgentSessions.contains(where: { $0.id == sessionId }) else {
                 review.setSending(false, id)
-                review.say("That agent session is unavailable. Choose another from the Agent menu. Your comments are kept.",
+                review.say("The PR's tracking session is unavailable. Your comments are kept.",
                            isError: true, in: id)
                 return
             }
@@ -512,5 +510,62 @@ extension AppModel {
         review.say("Queued \(sent.count) comment\(sent.count == 1 ? "" : "s") on the agent session",
                    in: id)
         if diffReviewPrId == id { closeDiffReview() }
+    }
+
+    /// No agent was chosen and no session tracks the PR: the review goes to a NEW
+    /// session started in the PR's checkout, with the review as its opening prompt.
+    /// It is not tracked (sending comments never starts tracking). A PR opened from a
+    /// URL starts in a fresh worktree of a known checkout of its repo, else in the home
+    /// folder (the prompt carries the PR URL, so `gh` still reaches it).
+    private func startAgentReview(_ id: String, target: DiffReviewModel.PrTarget,
+                                  sent: Set<String>, prompt: String) async {
+        let review = diffReview
+        var cwd = target.cwd
+        var isolate = false
+        if let address = PrAddress(cwd: target.cwd) {
+            if let checkout = await localCheckout(of: address) {
+                cwd = checkout
+                isolate = true
+            } else {
+                cwd = NSHomeDirectory()
+            }
+        }
+        review.say("Starting a new session for \(sent.count) comment\(sent.count == 1 ? "" : "s")…", in: id)
+        let session = await create(provider: .claude, cwd: cwd, skipPermissions: true,
+                                   isolateWorktree: isolate, initialInput: prompt)
+        review.setSending(false, id)
+        guard let session else {
+            // `create` already put the reason in `errorMessage`.
+            review.say("Review not sent for PR #\(target.pr.number): the session did not start. Your comments are kept.",
+                       isError: true, in: id)
+            return
+        }
+        review.removeSent(sent, from: id)
+        review.say("Sent \(sent.count) comment\(sent.count == 1 ? "" : "s") to a new session", in: id)
+        if diffReviewPrId == id {
+            closeDiffReview()
+            revealSession(session.id)
+        }
+    }
+
+    /// A project checkout this app knows whose `origin` is `address`'s repo.
+    private func localCheckout(of address: PrAddress) async -> String? {
+        var seen = Set<String>()
+        let projects = sessions.map { projectCwd(for: $0.cwd) }.filter { seen.insert($0).inserted }
+        return await Task.detached(priority: .userInitiated) {
+            projects.first { dir in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                process.arguments = ["-C", dir, "remote", "get-url", "origin"]
+                let out = Pipe()
+                process.standardOutput = out
+                process.standardError = FileHandle.nullDevice
+                guard (try? process.run()) != nil else { return false }
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                return process.terminationStatus == 0
+                    && address.isRepo(remote: String(decoding: data, as: UTF8.self))
+            }
+        }.value
     }
 }

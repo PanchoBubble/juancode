@@ -35,6 +35,8 @@ pub fn window(source: IdSource) -> (Duration, Duration) {
         IdSource::CodexRollout => Duration::from_secs(15 * 60),
         IdSource::OpencodeDb => Duration::from_secs(15 * 60),
         IdSource::KimiIndex => Duration::from_secs(15 * 60),
+        // Nothing scans agy's store yet, so there is nothing to wait for.
+        IdSource::AntigravityStore | IdSource::CursorStore => Duration::ZERO,
     };
     (timeout, Duration::from_millis(1_500))
 }
@@ -47,6 +49,7 @@ pub fn scan_once(source: IdSource, cwd: &str, since_ms: i64) -> Option<String> {
         IdSource::CodexRollout => codex_scan_once(cwd, since_ms, &codex_root()),
         IdSource::OpencodeDb => opencode_scan_once(cwd, since_ms, &opencode_db_path()),
         IdSource::KimiIndex => kimi_scan_once(cwd, since_ms, &kimi_home()),
+        IdSource::AntigravityStore | IdSource::CursorStore => None,
     }
 }
 

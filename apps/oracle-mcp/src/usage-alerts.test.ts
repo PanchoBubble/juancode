@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_CONTEXT_FRACTION,
-  DEFAULT_HANDOFF_TOKENS,
-  readUsageAlertThresholds,
-  REARM_MARGIN,
-  UsageAlertLatch,
-} from "./usage-alerts.ts";
+import { readUsageAlertThresholds, REARM_MARGIN, UsageAlertLatch } from "./usage-alerts.ts";
 import type { SessionUsageSample } from "./native-events.ts";
 
 /** A reading at `fraction` of a 200k window, optionally with a spend figure. */
@@ -21,10 +15,12 @@ function sample(fraction: number | undefined, costUsd?: number): SessionUsageSam
 }
 
 describe("readUsageAlertThresholds", () => {
-  it("defaults to an 80% context line and no spend cap", () => {
-    const t = readUsageAlertThresholds({});
-    expect(t.contextFraction).toBe(DEFAULT_CONTEXT_FRACTION);
-    expect(t.spendCapUsd).toBe(0);
+  it("sends no usage pings unless asked: none of them needs a reply", () => {
+    expect(readUsageAlertThresholds({})).toEqual({
+      contextFraction: 0,
+      spendCapUsd: 0,
+      handoffTokens: 0,
+    });
   });
 
   it("reads a percentage for context and dollars for spend", () => {
@@ -42,10 +38,10 @@ describe("readUsageAlertThresholds", () => {
     );
     expect(
       readUsageAlertThresholds({ JUANCODE_CONTEXT_ALERT_PERCENT: "nope" }).contextFraction,
-    ).toBe(DEFAULT_CONTEXT_FRACTION);
+    ).toBe(0);
     expect(
       readUsageAlertThresholds({ JUANCODE_CONTEXT_ALERT_PERCENT: "140" }).contextFraction,
-    ).toBe(DEFAULT_CONTEXT_FRACTION);
+    ).toBe(0);
     expect(readUsageAlertThresholds({ JUANCODE_SESSION_SPEND_CAP_USD: "-3" }).spendCapUsd).toBe(0);
   });
 });
@@ -148,14 +144,14 @@ describe("UsageAlertLatch — handoff", () => {
     ).toBeNull();
   });
 
-  it("reads its line from the environment, 0 disabling and junk falling back", () => {
-    expect(readUsageAlertThresholds({}).handoffTokens).toBe(DEFAULT_HANDOFF_TOKENS);
+  it("reads its line from the environment, 0 or junk disabling", () => {
+    expect(readUsageAlertThresholds({}).handoffTokens).toBe(0);
     expect(
       readUsageAlertThresholds({ JUANCODE_HANDOFF_ALERT_TOKENS: "180000" }).handoffTokens,
     ).toBe(180_000);
     expect(readUsageAlertThresholds({ JUANCODE_HANDOFF_ALERT_TOKENS: "0" }).handoffTokens).toBe(0);
     expect(readUsageAlertThresholds({ JUANCODE_HANDOFF_ALERT_TOKENS: "lots" }).handoffTokens).toBe(
-      DEFAULT_HANDOFF_TOKENS,
+      0,
     );
   });
 });

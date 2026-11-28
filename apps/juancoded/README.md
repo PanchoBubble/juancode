@@ -649,3 +649,17 @@ terminator; query floods in one output chunk coalesce. No report text is sent ba
 The parser was independently implemented from the specification, with lifecycle
 and presentation inspiration from [tuios](https://github.com/Gaurav-Gosain/tuios/blob/main/docs/PROGRAM_STATUS.md);
 no upstream source code was copied.
+
+### Cursor CLI
+
+Cursor is available as provider `cursor`, using `cursor-agent` on PATH (override
+with `JUANCODE_CURSOR_BIN`). Install and authenticate the official Cursor CLI first.
+Sessions inherit the user's environment and Cursor's own rules/MCP configuration.
+Model selection uses `--model`; opt-in permission bypass uses `--force --sandbox disabled`
+and still respects explicit Cursor deny rules. Presets are not applied because Cursor
+has no equivalent preset-selection flag.
+
+Cursor session IDs are not discovered yet: live sessions survive closing the app,
+but automatic conversation recovery after a daemon restart, external-session import,
+titles and usage reporting are not supported. Resume arguments use `--resume <chatId>`
+when an ID is already known; juancode never guesses using the last global chat.

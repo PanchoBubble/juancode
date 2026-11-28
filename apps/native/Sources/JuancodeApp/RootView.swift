@@ -65,6 +65,7 @@ private struct WindowContent: View {
 
     var body: some View {
         @Bindable var model = model
+        @Bindable var oracle = oracle
         // Screen-size-proportional default sidebar width (~20% of the window,
         // capped). `ideal` only applies until the user drags the split divider —
         // macOS autosaves manual column widths, so "manual wins" holds natively.
@@ -121,6 +122,17 @@ private struct WindowContent: View {
         }
         .sheet(isPresented: $model.showingNewSession) {
             NewSessionSheet()
+        }
+        .sheet(isPresented: $oracle.showingNewOracle) {
+            ProviderChooserView(
+                title: "New Oracle",
+                caption: "Its dispatches inherit the provider",
+                initial: oracle.oracleProvider,
+                onStart: { p in
+                    oracle.reveal()
+                    oracle.newOracle(provider: p)
+                }
+            )
         }
         .sheet(isPresented: $model.showingPromptPalette) {
             PromptPaletteView()
@@ -386,6 +398,8 @@ private struct FolderGroup: Identifiable {
     let name: String
     let sessions: [SessionMeta]
     let running: Int
+    /// How deep each dispatched session nests under its dispatcher in this folder.
+    var depth: [String: Int] = [:]
     var id: String { cwd }
 }
 
@@ -835,6 +849,11 @@ struct SidebarView: View {
     /// .confirmationDialog, because dialogs never present from a context-menu
     /// action on macOS (juancode-05u) while alerts do (see Rename above).
     @State private var confirmingClose: SessionMeta?
+    /// Rows picked with ⇧-click: selected for a bulk action, NOT opened. Empty means
+    /// the sidebar behaves as before (click opens). Pruned to the rows on screen, so a
+    /// bulk close can never reach a session the user can't see.
+    @State private var multiSelected: Set<String> = []
+    @State private var confirmingBulkClose = false
     /// Whether the session list holds keyboard focus, for vim-style nav (juancode-vgm).
     @FocusState private var listFocused: Bool
     /// Search stays hidden until requested from the menu or with ⌘F.
@@ -1058,12 +1077,18 @@ struct SidebarView: View {
         // Projects the user removed from the sidebar drop out here — the folder and
         // its rows, not the sessions themselves (restorable from the footer below).
         let groups = byCwd.filter { !model.isProjectHidden($0.key) }.map { cwd, sessions -> FolderGroup in
-            let ordered = sessions.sorted { sessionPinnedPrecedes($0, $1, pinned: model.pinnedSessions) }
+            let sorted = sessions.sorted { sessionPinnedPrecedes($0, $1, pinned: model.pinnedSessions) }
+            // Nested dispatches sit right under their dispatcher (juancode-cmew).
+            let nested = DispatchTree.nest(sorted, id: \.id,
+                                           parent: { $0.kind == .agent ? $0.parentSessionId : nil })
+            let ordered = nested.map(\.item)
             return FolderGroup(
                 cwd: cwd,
                 name: (cwd as NSString).lastPathComponent.isEmpty ? cwd : (cwd as NSString).lastPathComponent,
                 sessions: ordered,
-                running: ordered.filter { model.isLive($0.id) }.count)
+                running: ordered.filter { model.isLive($0.id) }.count,
+                depth: Dictionary(nested.filter { $0.depth > 0 }.map { ($0.item.id, $0.depth) },
+                                  uniquingKeysWith: { a, _ in a }))
         }
         .sorted { a, b in
             // Custom drag order first (folders the user has positioned); anything
@@ -1239,21 +1264,32 @@ struct SidebarView: View {
         var rows: [PanelNavigationRow] = []
         for group in groups {
             let folderID = "folder:" + group.cwd
-            rows.append(PanelNavigationRow(id: folderID,
+            rows.append(PanelNavigationRow(id: folderID, actions: [
+                PanelRowAction(id: "new", label: "New Session (n)", perform: {
+                    model.createInFolder(provider: group.sessions.first?.provider ?? .codex, cwd: group.cwd)
+                }),
+                PanelRowAction(id: "editor", label: "Open Editor (⌘⇧E)", perform: {
+                    if let meta = group.sessions.first(where: { !model.isExternal($0.id) }) {
+                        model.openEditorSession(meta.id, file: ".", root: group.cwd)
+                    }
+                })
+            ],
                 isInitial: isCollapsed(group.cwd) && group.sessions.contains { $0.id == model.selection },
                 open: { toggleFolder(group.cwd) }))
             guard !isCollapsed(group.cwd) else { continue }
             let shown = expandedFolders.contains(group.cwd) ? group.sessions : previewSessions(group)
             for meta in shown where !model.isExternal(meta.id) {
                 var actions = [
+                    PanelRowAction(id: "editor", label: "Open Editor (⌘⇧E)",
+                                   perform: { model.openEditorSession(meta.id) }),
                     PanelRowAction(id: "pin", label: model.isPinned(meta.id) ? "Unpin" : "Pin",
                                    perform: { model.togglePinned(meta.id) }),
                     PanelRowAction(id: "rename", label: "Rename", perform: { beginRename(meta) })
                 ]
                 if model.isLive(meta.id) {
-                    actions.append(PanelRowAction(id: "kill", label: "Kill Agent", perform: { model.killSession(meta.id) }))
+                    actions.append(PanelRowAction(id: "close", label: "Close Agent (c)", perform: { model.killSession(meta.id) }))
                 }
-                actions.append(PanelRowAction(id: "delete", label: "Delete", perform: { confirmingClose = meta }))
+                actions.append(PanelRowAction(id: "delete", label: "Delete (d)", perform: { confirmingClose = meta }))
                 rows.append(PanelNavigationRow(id: meta.id, actions: actions, isInitial: model.selection == meta.id,
                                                open: { model.selectSidebarSession(meta.id); model.focusTerminal() }))
             }
@@ -1367,6 +1403,7 @@ struct SidebarView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 4)
             }
+            if !multiSelected.isEmpty { bulkActionBar }
             ScrollViewReader { proxy in
             // Custom selection binding rather than a plain `$model.selection`: while
             // a panel or chain view is up we report no selection, so clicking ANY session
@@ -1376,10 +1413,16 @@ struct SidebarView: View {
             // click and breaks selection entirely on macOS. We never write nil back, so
             // the real selection (and its keep-alive pane) survives.
             List(selection: Binding(
-                get: { model.showingGitHub || model.showingBeads || model.showingDiffReview || model.chainView != nil ? nil : model.selection },
+                // Also nil while a multi-selection is up, so a ⇧-click on the row that is
+                // already selected still reaches the setter.
+                get: { model.showingGitHub || model.showingBeads || model.showingDiffReview || model.chainView != nil || !multiSelected.isEmpty ? nil : model.selection },
                 set: { newValue in
+                    guard let newValue else { return }
+                    // ⇧-click selects the row for a bulk action instead of opening it.
+                    if NSEvent.modifierFlags.contains(.shift) { toggleMultiSelected(newValue); return }
+                    multiSelected = []
                     if model.showingGitHub { model.showingGitHub = false }
-                    if let newValue { model.selectSidebarSession(newValue) }
+                    model.selectSidebarSession(newValue)
                 }
             )) {
                 // Flat rows, not a Section per project: the sidebar style puts a gap
@@ -1453,7 +1496,15 @@ struct SidebarView: View {
             // ⌃H asks the list to take focus; j/k then move the selection (juancode-vgm).
             .onChange(of: model.sidebarFocusToken) { _, _ in listFocused = true }
             // Keep the keyboard monitor's nav order in sync with what's actually shown.
-            .onChange(of: visibleIDs) { _, ids in model.navOrder = ids }
+            .onChange(of: visibleIDs) { _, ids in
+                model.navOrder = ids
+                if !multiSelected.isEmpty { multiSelected.formIntersection(ids) }
+            }
+            .onKeyPress(.escape) {
+                guard !multiSelected.isEmpty else { return .ignored }
+                multiSelected = []
+                return .handled
+            }
             // Minimize projects by default: collapse each folder the first time it
             // appears, then leave the user's manual toggles alone (juancode).
             .onChange(of: groups.map(\.cwd)) { _, cwds in collapseNewFolders(cwds) }
@@ -1544,17 +1595,27 @@ struct SidebarView: View {
                 renaming = nil
             }
         }
-        .alert("Close \"\(confirmingClose?.title ?? "session")\"?", isPresented: Binding(
+        .alert("Delete \"\(confirmingClose?.title ?? "session")\"?", isPresented: Binding(
             get: { confirmingClose != nil },
             set: { if !$0 { confirmingClose = nil } }
         ), presenting: confirmingClose) { meta in
             Button("Cancel", role: .cancel) { confirmingClose = nil }
-            Button("Close Session", role: .destructive) {
+            Button("Delete Session", role: .destructive) {
                 model.delete(meta.id)
                 confirmingClose = nil
             }
         } message: { meta in
             Text(closeWarning(meta))
+        }
+        .alert("Delete \(multiSelected.count) sessions?", isPresented: $confirmingBulkClose) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete \(multiSelected.count) Sessions", role: .destructive) {
+                let ids = Array(multiSelected)
+                multiSelected = []
+                model.closeSessions(ids)
+            }
+        } message: {
+            Text(bulkCloseWarning)
         }
         .onGeometryChange(for: Double.self) { $0.size.height.rounded() } action: { sidebarHeight = $0 }
         .perfTrackBody()
@@ -1642,10 +1703,10 @@ struct SidebarView: View {
     @ViewBuilder
     private func nativeRow(_ meta: SessionMeta, in group: FolderGroup, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
-        sessionRow(meta, external: external)
+        sessionRow(meta, external: external, depth: group.depth[meta.id] ?? 0)
             .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model))
             .modifier(SidebarRowChrome(divider: divider,
-                                       selected: external ? nil : model.selection == meta.id,
+                                       selected: external ? nil : isRowSelected(meta.id),
                                        session: meta))
             .modifier(SidebarListRow())
             .pointerCursor(enabled: !external)
@@ -1667,10 +1728,10 @@ struct SidebarView: View {
     @ViewBuilder
     private func scrollRow(_ meta: SessionMeta, in group: FolderGroup, divider: Bool) -> some View {
         let external = model.isExternal(meta.id)
-        sessionRow(meta, external: external)
+        sessionRow(meta, external: external, depth: group.depth[meta.id] ?? 0)
             .modifier(SessionSidebarDrag(meta: meta, enabled: !external && meta.kind != .editor, model: model))
             .modifier(SidebarRowChrome(divider: divider,
-                                       selected: external ? nil : model.selection == meta.id,
+                                       selected: external ? nil : isRowSelected(meta.id),
                                        session: meta))
             .pointerCursor(enabled: !external)
             .id(meta.id).panelRowFocus(.sessions, id: meta.id)
@@ -1680,6 +1741,8 @@ struct SidebarView: View {
             }
             .onTapGesture {
                 if !external {
+                    if NSEvent.modifierFlags.contains(.shift) { toggleMultiSelected(meta.id); return }
+                    multiSelected = []
                     model.selectSidebarSession(meta.id)
                     if model.showingGitHub { model.showingGitHub = false }
                 }
@@ -1744,7 +1807,7 @@ struct SidebarView: View {
 
     /// One session's row, as its own view so the per-session state it paints is
     /// observed there instead of here (see `SessionRowHost`).
-    private func sessionRow(_ meta: SessionMeta, external: Bool) -> some View {
+    private func sessionRow(_ meta: SessionMeta, external: Bool, depth: Int = 0) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if let pair = model.sessionPair(for: meta.id),
                let partner = model.sessions.first(where: { $0.id == pair.partner(of: meta.id) }) {
@@ -1755,10 +1818,18 @@ struct SidebarView: View {
                     .padding(.horizontal, 8)
             }
             SessionRowHost(meta: meta, external: external,
-                           selected: model.selection == meta.id,
+                           selected: isRowSelected(meta.id),
                            titleHighlight: titleHighlight,
                            bodySnippet: bodyHits[meta.id].flatMap { $0.isEmpty ? nil : $0 },
                            menu: { AnyView(rowContextMenu(meta)) })
+        }
+        // A dispatched child: indented under its dispatcher, with a guide line.
+        .padding(.leading, CGFloat(min(depth, 4)) * 12)
+        .overlay(alignment: .leading) {
+            if depth > 0 {
+                Rectangle().fill(Color.secondary.opacity(0.35)).frame(width: 1)
+                    .padding(.leading, CGFloat(min(depth, 4)) * 12 - 6)
+            }
         }
         .overlay(alignment: .leading) {
             if model.sessionPair(for: meta.id) != nil {
@@ -1773,6 +1844,53 @@ struct SidebarView: View {
         return q.isEmpty ? nil : q
     }
 
+    /// ⇧-click: add the row to the bulk selection, or take it out again.
+    private func toggleMultiSelected(_ id: String) {
+        guard !model.isExternal(id) else { return }
+        if multiSelected.contains(id) { multiSelected.remove(id) } else { multiSelected.insert(id) }
+    }
+
+    /// Whether a row paints as selected: the bulk selection while one exists, else
+    /// the opened session.
+    private func isRowSelected(_ id: String) -> Bool {
+        multiSelected.isEmpty ? model.selection == id : multiSelected.contains(id)
+    }
+
+    private var bulkActionBar: some View {
+        HStack(spacing: 8) {
+            Text("\(multiSelected.count) selected")
+                .font(.system(size: 11, weight: .semibold))
+            Spacer()
+            Button("Clear") { multiSelected = [] }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .clickCursor()
+            Button(role: .destructive) { confirmingBulkClose = true } label: {
+                Label("Delete", systemImage: "trash")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.red)
+            .clickCursor()
+            .help("Delete the selected sessions (⇧-click rows to select; Esc clears)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.12))
+    }
+
+    /// What deleting the whole selection discards, spelled out in the confirm alert.
+    private var bulkCloseWarning: String {
+        let picked = model.sessions.filter { multiSelected.contains($0.id) }
+        let running = picked.filter { model.isLive($0.id) }.count
+        let worktrees = picked.filter { $0.worktreePath != nil }.count
+        var parts: [String] = []
+        if running > 0 { parts.append("terminate \(running) running agent\(running == 1 ? "" : "s")") }
+        parts.append("delete the sessions and their scrollback")
+        if worktrees > 0 { parts.append("remove \(worktrees) worktree\(worktrees == 1 ? "" : "s")") }
+        return "This will " + parts.joined(separator: ", ") + "."
+    }
+
     /// What closing this session actually discards, spelled out in the confirm alert.
     private func closeWarning(_ meta: SessionMeta) -> String {
         var parts: [String] = []
@@ -1784,6 +1902,12 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func rowContextMenu(_ meta: SessionMeta) -> some View {
+        if multiSelected.count > 1, multiSelected.contains(meta.id) {
+            Button("Delete \(multiSelected.count) Selected Sessions…", role: .destructive) {
+                confirmingBulkClose = true
+            }
+            Divider()
+        }
         if model.sessionPair(for: meta.id) != nil {
             Button("Ungroup Split") { model.closeSessionSplit(keeping: meta.id) }
         }
@@ -1793,6 +1917,9 @@ struct SidebarView: View {
             Button("Rename…") { beginRename(meta) }
             if meta.kind == .agent {
                 Button("Session Alerts…") { managingSessionAlerts = meta }
+                Button(model.isKeptAlive(meta.id) ? "Allow Auto-Sleep" : "Keep Alive") {
+                    model.toggleKeepAlive(meta.id)
+                }
             }
             if meta.kind != .editor {
                 Button("Open in Editor") { model.openEditorSession(meta.id) }
@@ -2043,6 +2170,7 @@ private struct SessionRowHost: View {
                    runHelp: runCommand.map {
                        "Run `\($0)` in \(URL(fileURLWithPath: meta.cwd).lastPathComponent)"
                    } ?? "",
+                   onKill: external || !model.isLive(meta.id) ? nil : { model.killSession(meta.id) },
                    tiltRuntime: external ? nil : model.tiltRuntime,
                    selected: selected,
                    activating: model.isActivating(meta.id))
@@ -2745,7 +2873,7 @@ struct SessionRow: View {
     var onOpenBranchPr: (() -> Void)? = nil
     /// The row's action menu (same content as its context menu) — revealed on hover
     /// as an ellipsis on the trailing edge, replacing the old pencil (Open in Editor
-    /// lives inside it, still on ⌘E too). Nil for external rows.
+    /// lives inside it, still on ⌘⇧E too). Nil for external rows.
     var menuContent: (() -> AnyView)? = nil
     /// The user pinned this session — shows a pin ornament
     /// at rest and a filled pin in the hover chip.
@@ -2756,6 +2884,9 @@ struct SessionRow: View {
     /// ▶. Nil when there is no command for it, or for external rows.
     var onRun: (() -> Void)? = nil
     var runHelp: String = ""
+    /// Kill the running agent, keeping the session — the hover chip's knife-ish button.
+    /// Nil when the session isn't live, and for external rows.
+    var onKill: (() -> Void)? = nil
     var tiltRuntime: TiltRuntimeMonitor? = nil
     /// Whether this row is the current selection — drives showing the external
     /// resume affordance alongside hover.
@@ -2791,7 +2922,7 @@ struct SessionRow: View {
         // title line — a two-line row (title + usage subtitle) reads as one unit.
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if meta.kind == .agent {
-                ProviderIcon(provider: meta.provider, tint: statusRailColor,
+                ProviderIcon(provider: meta.provider, tint: meta.provider.brandColor,
                              working: live && activity == .busy && !activating)
                     .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.titleCenterShift }
             } else {
@@ -2802,10 +2933,13 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 highlightedTitle.lineLimit(1)
                     .font(.system(size: 13, weight: unread ? .semibold : .regular))
-                if let programStatus {
+                if !expanded {
+                    compactLine
+                }
+                if expanded, let programStatus {
                     ProgramStatusBadge(feed: programStatus, source: meta.id)
                 }
-                if isWorktree || !subtitle.isEmpty {
+                if expanded, isWorktree || !subtitle.isEmpty {
                     HStack(spacing: 3) {
                         // A branch glyph marks a worktree session — the fastest way to
                         // tell it apart from a main-checkout row.
@@ -2828,10 +2962,19 @@ struct SessionRow: View {
                 // Badge line, under the subtitle: the tracking capsule sits next to the
                 // change badge on the leading edge, so the trailing edge stays free for
                 // the hover pill (which used to land on top of the PR capsule).
-                if showPr || showIssue || changeBadge != nil || chain != nil || stackRunning {
+                if expanded, showPr || showIssue || changeBadge != nil || chain != nil || stackRunning
+                    || dispatcher != nil {
                     HStack(spacing: 5) {
                         if stackRunning, let tiltRuntime {
                             TiltRuntimeBadge(monitor: tiltRuntime, path: meta.cwd)
+                        }
+                        if let dispatcher {
+                            Button { openDispatcher(dispatcher.id) } label: {
+                                Label(dispatcher.name, systemImage: "arrow.turn.down.right")
+                                    .font(.system(size: 9)).lineLimit(1)
+                            }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help("Dispatched by \(dispatcher.name) — click to open it")
                         }
                         if let chain {
                             ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id))
@@ -2857,6 +3000,80 @@ struct SessionRow: View {
         // Floated, not laid out: see `hoverActions`.
         .overlay(alignment: .trailing) { hoverActions }
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.10), value: expanded)
+    }
+
+    /// The full row (branch, date, usage, every badge) while this is the active
+    /// session or the vim-motion cursor is on it. The mouse pointer never expands it;
+    /// at rest the row is two lines — title and `compactLine`.
+    /// The session that dispatched this one (`parentSessionId` on an agent), while it
+    /// is still known.
+    private var dispatcher: (id: String, name: String)? {
+        guard meta.kind == .agent, let pid = meta.parentSessionId else { return nil }
+        if model.isOracleSession(pid) { return (pid, "Oracle") }
+        guard let parent = model.sessions.first(where: { $0.id == pid }) else { return nil }
+        return (pid, parent.title.isEmpty ? String(pid.prefix(8)) : parent.title)
+    }
+
+    private func openDispatcher(_ id: String) {
+        if model.isOracleSession(id) { model.revealSession(id) } else { model.selectSidebarSession(id) }
+    }
+
+    private var expanded: Bool {
+        selected || model.panelNavigation.isFocused(.sessions, row: meta.id)
+    }
+
+    /// The at-rest second line: only glyphs and numbers, each one a signal.
+    /// worktree glyph · chain glyph (in the chain's color) · PR · context % · diff.
+    @ViewBuilder
+    private var compactLine: some View {
+        let counts = changeBadge?.counts ?? prStat
+        let pct = meta.usage?.contextPercent
+        let pressure = meta.usage?.contextPressure(handoffTokens: handoffTokens) ?? .ok
+        if isWorktree || chain != nil || showPr || showIssue || pct != nil || counts != nil
+            || dispatcher != nil {
+            HStack(spacing: 6) {
+                if let dispatcher {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 8)).foregroundStyle(.secondary)
+                        .help("Dispatched by \(dispatcher.name)")
+                }
+                if isWorktree {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                        .help(worktreeBranch ?? (meta.cwd as NSString).lastPathComponent)
+                }
+                if let chain {
+                    ChainBadge(chain: chain, member: ChainMemberRef(kind: .session, ref: meta.id),
+                               compact: true)
+                }
+                if showPr, let number = tracked?.number ?? branchPr?.number {
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.triangle.pull").font(.system(size: 8))
+                        Text("#\(number)").font(.system(size: 9, weight: .semibold).monospacedDigit())
+                    }
+                    .foregroundStyle(tracked.map { trackColor($0.state) } ?? .secondary)
+                } else if showIssue, let ti = trackedIssue {
+                    Image(systemName: "ticket").font(.system(size: 8))
+                        .foregroundStyle(issueTrackColor(ti.state))
+                }
+                if let pct {
+                    Text("\(pct)%")
+                        .font(.system(size: 9, weight: .medium).monospacedDigit())
+                        .foregroundStyle(pressure == .ok ? Color.secondary
+                            : pressure == .critical ? Color.red : Color.orange)
+                        .help(usageHelp)
+                }
+                if let counts {
+                    DiffStatLabel(counts: counts, size: 9)
+                }
+                if stackRunning {
+                    Image(systemName: "shippingbox.fill").font(.system(size: 8))
+                        .foregroundStyle(.green)
+                }
+            }
+            .lineLimit(1)
+        }
     }
 
     /// A Tilt stack is running from this row's checkout.
@@ -2906,13 +3123,14 @@ struct SessionRow: View {
     private var hoverActions: some View {
         if !external, hovering || model.panelNavigation.isFocused(.sessions, row: meta.id),
            menuContent != nil || onTogglePin != nil
-               || onRun != nil {
+               || onRun != nil || onKill != nil {
             RowHoverActions(menuContent: menuContent,
                             menuHelp: "Session actions",
                             onRun: onRun,
                             runHelp: runHelp,
                             onTogglePin: onTogglePin,
-                            pinned: pinned)
+                            pinned: pinned,
+                            onKill: onKill)
         }
     }
 
@@ -3078,9 +3296,9 @@ struct SessionRow: View {
 /// list answers "who's working / who needs me / who finished" at a glance:
 /// working = pulsing orange dot, waiting = amber question mark, done-unseen =
 /// green check (only until the session is viewed), live-but-idle = blue dot,
-/// exited = quiet grey dot.
-/// Shared by the Oracle dock and the ⌘K jump palette (juancode-dr0) so the two
-/// surfaces never drift into different vocabularies.
+/// exited = quiet grey dot. Used by the ⌘K jump palette (juancode-dr0); session
+/// rows instead tint their leading status rail with the same colors (the provider icon
+/// keeps its own per-agent hue).
 struct SessionStateGlyph: View {
     let live: Bool
     let activity: SessionActivity?
@@ -3379,7 +3597,7 @@ struct SessionContainer: View {
                     }
                     .help(model.editorTabs.hasEditor(meta.id)
                           ? "Show this session's editor (⌘2)"
-                          : "Open the editor on this session's worktree, in a tab beside the agent (⌘E)")
+                          : "Open the editor on this session's worktree, in a tab beside the agent (⌘⇧E)")
                     .hintTarget { model.openEditorSession(meta.id) }
                     .clickCursor()
                     splitButton

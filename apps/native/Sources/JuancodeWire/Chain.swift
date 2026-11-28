@@ -41,6 +41,8 @@ public struct ChainMember: Codable, Sendable, Equatable, Hashable {
     /// The loop role a dispatch gave it (`orchestrator`, `planner`, `implementer`,
     /// `tester`); nil in an unroled chain.
     public var role: String?
+    /// A beads/Linear ticket a client reported closed; the wire omits it while false.
+    public var done: Bool?
 
     public init(kind: ChainMemberKind, ref: String, title: String? = nil, url: String? = nil,
                 addedAt: Int = 0, role: String? = nil) {

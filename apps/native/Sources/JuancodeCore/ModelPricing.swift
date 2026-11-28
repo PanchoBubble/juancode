@@ -95,10 +95,10 @@ public enum ContextPressure: Sendable, Equatable {
     /// At/over `criticalFraction` — the next turn is likely to hit auto-compaction.
     case critical
 
-    /// The default context warn line, also the sidecar's alert default.
+    /// The default context warn line (badge tint).
     public static let warnFraction = 0.8
     public static let criticalFraction = 0.95
-    /// The default handoff line in tokens, also the sidecar's `DEFAULT_HANDOFF_TOKENS`.
+    /// The default handoff line in tokens (badge tint).
     /// Absolute rather than a window fraction: 0.8 of a 1M window is 800k, far past
     /// where cache reads dominate the spend. 0 disables it.
     public static let defaultHandoffTokens = 250_000

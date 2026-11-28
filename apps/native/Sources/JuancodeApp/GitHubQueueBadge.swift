@@ -480,6 +480,10 @@ struct GitHubQueueBadge: View {
                         addressRow = row
                     })
                 }
+                actions.append(QueueAction(id: "quickPrompt", symbol: "paperplane", label: "Send saved prompt",
+                    help: "Send your saved prompt (Settings → Sessions) to this PR's tracking agent, or a fresh one") {
+                    PrQuickPrompt.send(pr, cwd: cwd, model: model)
+                })
                 actions.append(QueueAction(id: "review", symbol: "text.bubble", label: "Review diff",
                     help: "Review: the PR's diff against its base in the full-width review — comment on lines, send them to its agent") {
                     showing = false

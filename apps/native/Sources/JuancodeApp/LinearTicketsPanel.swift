@@ -325,6 +325,7 @@ private struct LinearTicketRow: View {
     let start: LinearStartWork
     @State private var hovering = false
     @Binding var workRequest: String?
+    @State private var showingAgentPrompt = false
     /// Briefly true after the hover copy button, which then shows a checkmark.
     @State private var copied = false
 
@@ -385,6 +386,16 @@ private struct LinearTicketRow: View {
             guard id == ticket.id else { return }
             workRequest = nil
             workOn()
+        }
+        .sheet(isPresented: $showingAgentPrompt) {
+            if let root = start.root {
+                AgentPromptSheet(
+                    title: "Work on \(ticket.identifier)", subtitle: ticket.title, url: ticket.url,
+                    promptHelp: "The ticket and your prompt are sent when the agent starts."
+                ) { provider, prompt in
+                    await model.workOnLinearTicket(ticket, cwd: root, provider: provider, prompt: prompt)
+                }
+            }
         }
     }
 
@@ -457,8 +468,8 @@ private struct LinearTicketRow: View {
     }
 
     private func workOn() {
-        guard let root = start.root else { return }
-        model.workOnLinearTicket(ticket, cwd: root)
+        guard start.root != nil else { return }
+        showingAgentPrompt = true
     }
 
     @ViewBuilder private var priority: some View {

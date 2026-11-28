@@ -19,7 +19,14 @@ struct NewSessionSheet: View {
             if !resolved {
                 Color.clear.frame(width: 1, height: 1)
             } else if let seed, !fullForm {
-                ProviderChooserView(seed: seed, moreOptions: { fullForm = true })
+                ProviderChooserView(
+                    caption: ProviderChooserView.folderCaption(seed),
+                    initial: seed.provider,
+                    moreOptions: { fullForm = true },
+                    onStart: { p in
+                        model.createInFolder(provider: p, cwd: seed.cwd, isolateWorktree: seed.isolateWorktree)
+                    }
+                )
             } else if let seed {
                 NewSessionView(provider: seed.provider, cwd: seed.cwd)
             } else {
@@ -42,8 +49,12 @@ struct ProviderChooserView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
-    let seed: NewSessionTarget
-    let moreOptions: () -> Void
+    var title = "New Session"
+    let caption: String
+    /// Nil hides the "More options…" button (the Oracle chooser has no full form).
+    let moreOptions: (() -> Void)?
+    /// Runs once with the chosen provider; the chooser dismisses itself afterwards.
+    let onStart: (ProviderId) -> Void
 
     @State private var provider: ProviderId
     /// Latched on the first ⏎ so a repeat before the sheet is gone can't spawn twice.
@@ -52,17 +63,20 @@ struct ProviderChooserView: View {
 
     private let providers = ProviderId.allCases
 
-    init(seed: NewSessionTarget, moreOptions: @escaping () -> Void) {
-        self.seed = seed
+    init(title: String = "New Session", caption: String, initial: ProviderId,
+         moreOptions: (() -> Void)? = nil, onStart: @escaping (ProviderId) -> Void) {
+        self.title = title
+        self.caption = caption
         self.moreOptions = moreOptions
-        _provider = State(initialValue: seed.provider)
+        self.onStart = onStart
+        _provider = State(initialValue: initial)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("New Session").font(.title3).bold()
-                Text(folderCaption)
+                Text(title).font(.title3).bold()
+                Text(caption)
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
             }
@@ -75,10 +89,12 @@ struct ProviderChooserView: View {
             .onKeyPress(.upArrow) { move(-1) }
             .onKeyPress(.downArrow) { move(1) }
             HStack {
-                Button("More options…", action: moreOptions)
-                    .keyboardShortcut("o", modifiers: .command)
-                    .help("Opening prompt, folder, worktree and permission settings (⌘O)")
-                    .clickCursor()
+                if let moreOptions {
+                    Button("More options…", action: moreOptions)
+                        .keyboardShortcut("o", modifiers: .command)
+                        .help("Opening prompt, folder, worktree and permission settings (⌘O)")
+                        .clickCursor()
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).clickCursor()
                 Button("Start") { start() }
@@ -126,7 +142,7 @@ struct ProviderChooserView: View {
         return "not found"
     }
 
-    private var folderCaption: String {
+    static func folderCaption(_ seed: NewSessionTarget) -> String {
         let name = (seed.cwd as NSString).lastPathComponent
         return seed.isolateWorktree ? "\(name) · new worktree" : name
     }
@@ -139,7 +155,7 @@ struct ProviderChooserView: View {
     private func start() {
         guard !started else { return }
         started = true
-        model.createInFolder(provider: provider, cwd: seed.cwd, isolateWorktree: seed.isolateWorktree)
+        onStart(provider)
         dismiss()
     }
 }

@@ -244,6 +244,8 @@ public func recoverCliSessionId(
         cands = opencodeCandidates(roots.opencodeDb ?? OpencodeStore.defaultPath, cwd)
     case .kimi:
         cands = kimiCandidates(roots.kimiHome ?? RECOVER_KIMI_HOME, cwd)
+    case .antigravity, .cursor:
+        cands = []  // these providers' stores are not read yet
     }
     return chooseNearest(cands, createdAtMs, excludeIds)
 }

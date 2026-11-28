@@ -10,11 +10,28 @@ import JuancodeCore
 struct ChainsRailPanel: View {
     @Environment(AppModel.self) private var model
     @AppStorage("chains.rail.showInactive") private var showInactive = false
+    @AppStorage("chains.rail.sortOrder") private var sortRaw = SortOrder.newest.rawValue
+    private var sort: SortOrder { SortOrder(rawValue: sortRaw) ?? .newest }
+
+    enum SortOrder: String, CaseIterable, Identifiable {
+        case newest, oldest, updated, name, largest, attention
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .newest: return "Newest"
+            case .oldest: return "Oldest"
+            case .updated: return "Recently updated"
+            case .name: return "Name"
+            case .largest: return "Most items"
+            case .attention: return "Needs attention"
+            }
+        }
+    }
 
     var body: some View {
         // Nested chains sit under their parent, whose row counts their attention too.
-        let active = model.chains.outline(model.chains.activeRoots)
-        let inactive = model.chains.outline(model.chains.inactive.filter { !model.chains.isNested($0) })
+        let active = model.chains.outline(sorted(model.chains.activeRoots))
+        let inactive = model.chains.outline(sorted(model.chains.inactive.filter { !model.chains.isNested($0) }))
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if model.supportsChains {
@@ -24,6 +41,7 @@ struct ChainsRailPanel: View {
                         .help("Start an orchestrator on a goal; it gets its own chain")
                         .clickCursor()
                 }
+                if model.supportsChains && !(active.isEmpty && inactive.isEmpty) { sortMenu }
                 if !model.supportsChains {
                     note("This core doesn't keep chains.")
                 } else if active.isEmpty {
@@ -41,6 +59,60 @@ struct ChainsRailPanel: View {
             }
             .padding(.vertical, 4)
         }
+    }
+
+    /// Last activity: the latest of its creation, close and member additions.
+    private func updatedAt(_ c: Chain) -> Int {
+        max(c.createdAt, c.closedAt ?? 0, c.members.map(\.addedAt).max() ?? 0)
+    }
+
+    private func sorted(_ chains: [Chain]) -> [Chain] {
+        // Ties fall back to newest first so the order never shuffles between broadcasts.
+        let newest: (Chain, Chain) -> Bool = { ($0.createdAt, $0.slug) > ($1.createdAt, $1.slug) }
+        switch sort {
+        case .newest: return chains.sorted(by: newest)
+        case .oldest: return chains.sorted { !newest($0, $1) }
+        case .updated:
+            return chains.sorted { updatedAt($0) != updatedAt($1) ? updatedAt($0) > updatedAt($1) : newest($0, $1) }
+        case .name:
+            return chains.sorted {
+                let r = $0.name.localizedStandardCompare($1.name)
+                return r != .orderedSame ? r == .orderedAscending : newest($0, $1)
+            }
+        case .largest:
+            return chains.sorted { $0.members.count != $1.members.count ? $0.members.count > $1.members.count : newest($0, $1) }
+        case .attention:
+            let weight = Dictionary(uniqueKeysWithValues: chains.map { c in
+                let a = model.chainAttention(c)
+                return (c.slug, a.waitingInput + a.needsDecision)
+            })
+            return chains.sorted {
+                let (l, r) = (weight[$0.slug] ?? 0, weight[$1.slug] ?? 0)
+                return l != r ? l > r : updatedAt($0) != updatedAt($1) ? updatedAt($0) > updatedAt($1) : newest($0, $1)
+            }
+        }
+    }
+
+    private var sortMenu: some View {
+        HStack {
+            Spacer(minLength: 0)
+            Menu {
+                ForEach(SortOrder.allCases) { o in
+                    Button { sortRaw = o.rawValue } label: {
+                        if sort == o { Label(o.label, systemImage: "checkmark") } else { Text(o.label) }
+                    }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.up.arrow.down").font(.system(size: 9))
+                    Text(sort.label).font(.system(size: 11, weight: .medium))
+                }
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            .help("Sort order, applied to active and inactive chains")
+            .clickCursor()
+        }
+        .padding(.horizontal, 12).padding(.bottom, 2)
     }
 
     private func note(_ text: String) -> some View {
@@ -94,6 +166,14 @@ private struct ChainRailRow: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
+            let tickets = chain.members.filter { $0.kind == .beads || $0.kind == .linear }
+            if !tickets.isEmpty {
+                let done = tickets.filter { $0.done == true }.count
+                Label("\(done)/\(tickets.count)", systemImage: "ticket")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .help("\(done) of \(tickets.count) tickets done")
+            }
             Spacer(minLength: 0)
             if attention.waitingInput > 0 {
                 pill(attention.waitingInput, icon: "hand.raised.fill",

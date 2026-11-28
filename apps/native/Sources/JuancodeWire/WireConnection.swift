@@ -151,6 +151,7 @@ public final class WireConnection: @unchecked Sendable {
         let task: URLSessionWebSocketTask? = lock.withLock {
             guard !stopped, self.task == nil else { return nil }
             let t = session.webSocketTask(with: url)
+            t.maximumMessageSize = 64 << 20 // default 1 MB; a full session list outgrew it
             self.task = t
             closedReason = nil
             return t

@@ -502,19 +502,13 @@ struct JuancodeApp: App {
                 }
                 .appShortcut(.previousChainTab, shortcuts)
                 .disabled(model.chainView == nil)
-                // ⌘⇧E shows/hides the file-tree sidebar over the selected session's
-                // worktree (the Files side-panel tab).
-                Button("Toggle File Tree") {
-                    performShortcut(.toggleFileTree, model: model, oracle: oracle)
-                }
-                .appShortcut(.toggleFileTree, shortcuts)
                 // ⌃T toggles the bottom shell-terminal panel from anywhere. A menu
                 // key-equivalent fires even while the SwiftTerm view holds focus.
                 Button("Toggle Terminal") {
                     performShortcut(.toggleTerminal, model: model, oracle: oracle)
                 }
                 .appShortcut(.toggleTerminal, shortcuts)
-                // ⌘E opens the selected session's worktree in $EDITOR (nvim) in a tab
+                // ⌘⇧E opens the selected session's worktree in $EDITOR (nvim) in a tab
                 // beside its agent, so the editor lands in the agent's checkout.
                 Button("Open Editor for Session") {
                     performShortcut(.openEditor, model: model, oracle: oracle)

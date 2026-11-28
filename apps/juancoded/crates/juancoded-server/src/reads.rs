@@ -360,7 +360,8 @@ fn message(record: TranscriptRecord) -> Option<ChatMessage> {
         TranscriptEvent::ToolResult { ok, output, .. } => ("toolResult", None, Some(ok), output),
         TranscriptEvent::Step { .. }
         | TranscriptEvent::TurnEnd { .. }
-        | TranscriptEvent::Usage { .. } => return None,
+        | TranscriptEvent::Usage { .. }
+        | TranscriptEvent::UsageSnapshot { .. } => return None,
     };
     Some(ChatMessage {
         seq: record.seq,

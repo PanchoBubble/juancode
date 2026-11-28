@@ -1062,6 +1062,13 @@ impl SessionRegistry {
         };
         match self.spawn_into(&id, &live, plan) {
             Ok(()) => {
+                // `created` is a private reply to the spawning socket. Existing
+                // desktop/sidecar connections also need the row, even if the
+                // requester disconnects before the CLI produces any activity.
+                let _ = self.inner.events.send(SessionEvent::Meta {
+                    session_id: id.clone(),
+                    meta: self.meta(&id).unwrap_or_else(|| meta.clone()),
+                });
                 self.start_id_discovery(&id, &live, req.provider, meta.created_at);
                 // The claim the spawn was made under is public from the start, so a
                 // second viewer never has to infer who is driving.
@@ -1513,8 +1520,8 @@ impl SessionRegistry {
     /// This is the Swift core's `persistMeta` and its `onMetaChange` listener in one
     /// place, and the reason a new meta field needs no new emit.
     ///
-    /// The snapshot edits — `created`, `attached` — stay out of it: they carry the
-    /// whole row already, and an exit has `exit` to announce itself with.
+    /// Snapshot replies do not edit metadata. A successful create separately
+    /// broadcasts its initial row so clients other than the requester discover it.
     fn edit_meta(
         &self,
         id: &str,

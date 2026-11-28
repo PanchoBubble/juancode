@@ -74,7 +74,7 @@ struct RightRailPanels: View {
 
     private var prefs: RightRailPrefs.State {
         _ = (viewRaw, queueRaw, orderRaw)
-        return RightRailPrefs.state(RightRailPrefs.Stored(.standard))
+        return RightRailPrefs.state(RightRailPrefs.Stored(.standard)).showing(queueRaw ?? "prs")
     }
 
     private func show(_ panel: RightRailPanel) {
@@ -103,7 +103,7 @@ struct RightRailPanels: View {
     }
 
     private var visiblePanels: [RightRailPanel] {
-        if stacked { return stack.shown.compactMap(RightRailPanel.init(rawValue:)) }
+        if stacked { return stack.shown.compactMap(RightRailPanel.init(rawValue:)).filter { $0 != .worktree } }
         return [RightRailPanel(rawValue: prefs.destination) ?? .worktree]
     }
 
@@ -135,7 +135,7 @@ struct RightRailPanels: View {
             GeometryReader { geometry in
                 let frames = panelFrames(visible, height: geometry.size.height)
                 ZStack(alignment: .topLeading) {
-                    ForEach(RightRailPanel.allCases) { panel in
+                    ForEach(RightRailPanel.allCases.filter { $0 != .worktree }) { panel in
                         if visible.contains(panel) || mounted.contains(panel) {
                             VStack(spacing: 0) {
                                 if stacked { stackHeader(panel) }
@@ -251,7 +251,7 @@ struct RightRailPanels: View {
 
     private var stackSelector: some View {
         HStack(spacing: 2) {
-            ForEach(stack.order.compactMap(RightRailPanel.init(rawValue:))) { panel in
+            ForEach(stack.order.compactMap(RightRailPanel.init(rawValue:)).filter { $0 != .worktree }) { panel in
                 let selected = stack.visible.contains(panel.rawValue)
                 Button { toggle(panel) } label: {
                     ViewThatFits(in: .horizontal) {
@@ -296,9 +296,6 @@ struct RightRailPanels: View {
 
     private func tabBar(_ p: RightRailPrefs.State) -> some View {
         HStack(spacing: 2) {
-            tab(.worktree, selected: p.view == .worktree) {
-                WorktreeRailAccessory().fixedSize()
-            }
             tab(.overview, selected: p.view == .overview) {
                 overviewBadge
             }

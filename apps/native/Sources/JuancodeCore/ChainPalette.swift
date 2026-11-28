@@ -29,7 +29,24 @@ public enum ChainPalette {
     /// The slug's color. Dark mode lifts brightness and drops saturation so the text
     /// stays readable on black; light mode darkens it for the same reason on white.
     public static func tone(for slug: String, dark: Bool) -> Tone {
-        let hue = hues[slot(for: slug)]
+        tone(slot: slot(for: slug), dark: dark)
+    }
+
+    /// The slug's second hue, paired with `slot` so two chains sharing a main hue
+    /// still differ. Never the main hue's neighbour on the wheel, so the pair reads
+    /// as two colors; drawn from the hash's high bits, independent of `slot`.
+    public static func accentSlot(for slug: String) -> Int {
+        let n = hues.count
+        let offset = 2 + Int((fnv1a(slug) >> 32) % UInt64(n - 3))
+        return (slot(for: slug) + offset) % n
+    }
+
+    public static func accentTone(for slug: String, dark: Bool) -> Tone {
+        tone(slot: accentSlot(for: slug), dark: dark)
+    }
+
+    static func tone(slot: Int, dark: Bool) -> Tone {
+        let hue = hues[slot]
         return dark
             ? Tone(hue: hue, saturation: 0.55, brightness: 0.95)
             : Tone(hue: hue, saturation: 0.80, brightness: 0.62)

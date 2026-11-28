@@ -219,6 +219,7 @@ public enum CoreProxyServer {
             let fromPhone = RemoteAuth.isRemote(wsContext.request, bindHost: bindHost)
             let session = URLSession(configuration: .ephemeral)
             let task = session.webSocketTask(with: upstream)
+            task.maximumMessageSize = 64 << 20 // default 1 MB; a full session list outgrew it
             task.resume()
             defer {
                 task.cancel(with: .goingAway, reason: nil)
